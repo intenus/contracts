@@ -1,0 +1,1 @@
+sui client publish --gas-budget 1000000000 --doc
