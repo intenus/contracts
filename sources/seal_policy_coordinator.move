@@ -167,7 +167,6 @@ public entry fun seal_approve_intent(
         }
     } else if (role == ROLE_ROUTER) {
         policy.router_access_enabled
-        // NOTE: TEE attestation is verified off-chain by Seal Key Server before calling this.
     } else {
         false
     };
@@ -414,7 +413,6 @@ public fun auto_revoke_expired(
 }
 
 // ===== VIEW FUNCTIONS =====
-// The `check_access` function is now replaced by `seal_approve_*` entry functions.
 
 // ===== INTERNAL HELPERS =====
 
