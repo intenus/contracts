@@ -1,13 +1,8 @@
 module intenus::batch_manager {
     // ===== IMPORTS =====
-    use sui::object;
-    use sui::tx_context;
-    use sui::transfer;
     use sui::table::{Self, Table};
     use sui::event;
     use sui::clock::{Self, Clock};
-    use std::option::{Self, Option};
-    use std::vector;
 
     // ===== ERRORS =====
     const E_BATCH_EXISTS: u64 = 5002;
@@ -273,8 +268,171 @@ module intenus::batch_manager {
     // ===== TEST HELPERS =====
 
     #[test_only]
+    use sui::test_scenario::{Self as ts};
+
+    #[test_only]
+    const ADMIN: address = @0xA;
+    #[test_only]
+    const BACKEND: address = @0xB;
+
+    #[test_only]
     public fun init_for_testing(ctx: &mut tx_context::TxContext) {
         init(ctx);
     }
-}
 
+    #[test_only]
+    /// Test wrapper for record_intent
+    public fun test_record_intent(
+        manager: &mut BatchManager,
+        epoch: u64,
+        additional_intents: u64,
+        additional_value_usd: u64
+    ) {
+        record_intent(manager, epoch, additional_intents, additional_value_usd);
+    }
+
+    #[test_only]
+    /// Test wrapper for close_batch
+    public fun test_close_batch(manager: &mut BatchManager, epoch: u64) {
+        close_batch(manager, epoch);
+    }
+
+    #[test_only]
+    /// Test wrapper for record_solution
+    public fun test_record_solution(manager: &mut BatchManager, epoch: u64) {
+        record_solution(manager, epoch);
+    }
+
+    #[test_only]
+    /// Test wrapper for set_winner
+    public fun test_set_winner(
+        manager: &mut BatchManager,
+        epoch: u64,
+        winner: address,
+        winning_solution_id: vector<u8>,
+        total_surplus_generated: u64,
+        clock: &Clock
+    ) {
+        set_winner(manager, epoch, winner, winning_solution_id, total_surplus_generated, clock);
+    }
+
+    /// Test core value: Complete batch lifecycle from open to executed
+    /// This tests the minimal on-chain batch tracking that backs off-chain orchestration
+    #[test]
+    fun test_batch_lifecycle_complete() {
+        let mut scenario = ts::begin(ADMIN);
+        init(ts::ctx(&mut scenario));
+        
+        // Create and share Clock for testing
+        let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+        clock.share_for_testing();
+        ts::next_tx(&mut scenario, ADMIN);
+        
+        let admin_cap = ts::take_from_sender<AdminCap>(&scenario);
+        transfer::transfer(admin_cap, ADMIN);
+        ts::next_tx(&mut scenario, ADMIN);
+
+        let batch_id = b"batch_epoch_1";
+        let winner = @0xC;
+        let solution_id = b"solution_winner_001";
+
+        // --- Start new batch ---
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let admin_cap_ref = ts::take_from_sender<AdminCap>(&scenario);
+            let mut manager = ts::take_shared<BatchManager>(&scenario);
+            // Clock is created automatically when first accessed in a transaction
+            let clock_ref = ts::take_shared<Clock>(&scenario);
+            
+            start_new_batch(&admin_cap_ref, &mut manager, batch_id, &clock_ref);
+            
+            let current_batch = get_current_batch(&manager);
+            assert!(option::is_some(&current_batch), 1);
+            
+            transfer::transfer(admin_cap_ref, ADMIN);
+            ts::return_shared(manager);
+            ts::return_shared(clock_ref);
+        };
+
+        // --- Backend records intents ---
+        ts::next_tx(&mut scenario, BACKEND);
+        {
+            let mut manager = ts::take_shared<BatchManager>(&scenario);
+            
+            test_record_intent(&mut manager, 1, 5, 10_000_000); // 5 intents, $10k value
+            
+            let batch = get_current_batch(&manager);
+            let batch_summary = *option::borrow(&batch);
+            assert!(batch_summary.intent_count == 5, 2);
+            assert!(batch_summary.status == STATUS_SOLVING, 3);
+            
+            ts::return_shared(manager);
+        };
+
+        // --- Backend records solutions ---
+        ts::next_tx(&mut scenario, BACKEND);
+        {
+            let mut manager = ts::take_shared<BatchManager>(&scenario);
+            
+            test_record_solution(&mut manager, 1);
+            test_record_solution(&mut manager, 1);
+            test_record_solution(&mut manager, 1); // 3 solvers submitted
+            
+            let batch = get_current_batch(&manager);
+            let batch_summary = *option::borrow(&batch);
+            assert!(batch_summary.solver_count == 3, 4);
+            
+            ts::return_shared(manager);
+        };
+
+        // --- Backend closes batch and moves to ranking ---
+        ts::next_tx(&mut scenario, BACKEND);
+        {
+            let mut manager = ts::take_shared<BatchManager>(&scenario);
+            
+            test_close_batch(&mut manager, 1);
+            
+            let batch = get_current_batch(&manager);
+            let batch_summary = *option::borrow(&batch);
+            assert!(batch_summary.status == STATUS_RANKING, 5);
+            
+            ts::return_shared(manager);
+        };
+
+        // --- Backend sets winner and finalizes ---
+        ts::next_tx(&mut scenario, BACKEND);
+        {
+            let mut manager = ts::take_shared<BatchManager>(&scenario);
+            let clock_ref = ts::take_shared<Clock>(&scenario);
+            
+            test_set_winner(
+                &mut manager,
+                1,
+                winner,
+                solution_id,
+                500_000, // $500 surplus generated
+                &clock_ref,
+            );
+            
+            let batch = get_batch_stats(&manager, 1);
+            let batch_summary = *option::borrow(&batch);
+            assert!(batch_summary.status == STATUS_EXECUTED, 6);
+            
+            // Active batch should be cleared
+            let current = get_current_batch(&manager);
+            assert!(option::is_none(&current), 7);
+            
+            ts::return_shared(manager);
+            ts::return_shared(clock_ref);
+        };
+
+        // Clean up Clock
+        ts::next_tx(&mut scenario, ADMIN);
+        {
+            let clock = ts::take_shared<Clock>(&scenario);
+            clock.destroy_for_testing();
+        };
+
+        ts::end(scenario);
+    }
+}

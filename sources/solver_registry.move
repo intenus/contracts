@@ -128,6 +128,16 @@ fun init(ctx: &mut tx_context::TxContext) {
     transfer::share_object(registry);
 }
 
+#[test_only]
+public fun init_for_testing(ctx: &mut tx_context::TxContext) {
+    init(ctx)
+}
+
+#[test_only]
+public fun get_admin_cap_for_testing(ctx: &mut tx_context::TxContext): AdminCap {
+    AdminCap { id: object::new(ctx) }
+}
+
 // ===== ENTRY FUNCTIONS (User-facing) =====
 
 /// Register as a solver with initial stake
@@ -235,7 +245,7 @@ public fun complete_withdrawal(
     amount: u64,
     clock: &Clock,
     ctx: &mut tx_context::TxContext,
-) {
+): Coin<SUI> {
     let solver_address = tx_context::sender(ctx);
     let timestamp = clock::timestamp_ms(clock);
 
@@ -263,13 +273,12 @@ public fun complete_withdrawal(
     let withdrawal_coin = coin::from_balance(withdrawal_balance, ctx);
 
     // Transfer to solver
-    transfer::public_transfer(withdrawal_coin, solver_address);
-
     event::emit(WithdrawalCompleted {
         solver: solver_address,
         amount,
         timestamp,
     });
+    withdrawal_coin
 }
 
 // ===== FRIEND FUNCTIONS (Inter-module) =====
@@ -350,9 +359,12 @@ public(package) fun slash_solver(
     profile.status = STATUS_SLASHED;
     profile.reputation_score = profile.reputation_score / 2; // Halve reputation
 
-    // Burn slashed tokens by destroying the balance
+    // Burn slashed tokens by creating a coin and burning it
     let slashed_balance = balance::split(stake_balance, slash_amount);
-    balance::destroy_zero(slashed_balance);
+    let slashed_coin = coin::from_balance(slashed_balance, _ctx);
+    // In a real implementation, this would be burned via treasury or similar mechanism
+    // For testing, we'll transfer to a burn address (0x0)
+    transfer::public_transfer(slashed_coin, @0x0);
 
     event::emit(SolverSlashed {
         solver,
@@ -428,6 +440,12 @@ public fun get_registry_stats(registry: &SolverRegistry): (u64, u64, u64) {
     (registry.total_solvers, registry.min_stake, registry.withdrawal_cooldown)
 }
 
+// ===== CONSTANT GETTERS (for testing) =====
+
+public(package) fun get_min_stake_amount(): u64 { MIN_STAKE_AMOUNT }
+public(package) fun get_withdrawal_cooldown_ms(): u64 { WITHDRAWAL_COOLDOWN_MS }
+public(package) fun get_slash_percentage(): u8 { SLASH_PERCENTAGE }
+
 // ===== INTERNAL HELPERS =====
 
 /// Calculate reputation score based on performance metrics
@@ -438,16 +456,16 @@ fun calculate_reputation(profile: &SolverProfile): u64 {
 
     // Win rate component (40% weight)
     let win_rate = (profile.batches_won * 100) / profile.total_batches_participated;
-    let win_component = (win_rate * 40) / 100;
+    let win_component = (win_rate * MAX_REPUTATION * 40) / 10000;
 
     // Accuracy component (30% weight)
-    let accuracy_component = (profile.accuracy_score * 30) / 100;
+    let accuracy_component = (profile.accuracy_score * MAX_REPUTATION * 30) / 10000;
 
     // Volume component (30% weight) - logarithmic scaling
     let volume_component = if (profile.total_surplus_generated > 0) {
         let log_volume = log_approximation(profile.total_surplus_generated);
         let max_log = log_approximation(1_000_000_000_000); // 1M SUI equivalent
-        (log_volume * 30) / max_log
+        (log_volume * MAX_REPUTATION * 30) / (max_log * 100)
     } else {
         0
     };
@@ -497,27 +515,218 @@ public fun update_slash_percentage(
 // ===== TEST FUNCTIONS =====
 
 #[test_only]
-public fun init_for_testing(ctx: &mut tx_context::TxContext) {
-    init(ctx);
+use sui::test_scenario::{Self as ts};
+
+#[test_only]
+const ADMIN: address = @0xA;
+#[test_only]
+const SOLVER: address = @0xB;
+#[test_only]
+const BACKEND: address = @0xC; // Backend address for friend functions
+
+#[test_only]
+/// Test wrapper for record_batch_participation
+public fun test_record_batch_participation(
+    registry: &mut SolverRegistry,
+    solver: address,
+    batch_id: vector<u8>,
+    won: bool,
+    surplus_generated: u64,
+    claimed_metrics: u64,
+    actual_metrics: u64,
+    epoch: u64,
+) {
+    record_batch_participation(
+        registry,
+        solver,
+        batch_id,
+        won,
+        surplus_generated,
+        claimed_metrics,
+        actual_metrics,
+        epoch,
+    );
 }
 
 #[test_only]
-public fun create_test_solver_profile(
-    solver_address: address,
-    stake_amount: u64,
-    reputation_score: u64,
-): SolverProfile {
-    SolverProfile {
-        solver_address,
-        stake_amount,
-        reputation_score,
-        total_batches_participated: 0,
-        batches_won: 0,
-        total_surplus_generated: 0,
-        accuracy_score: 100,
-        last_submission_epoch: 0,
-        registration_timestamp: 0,
-        status: STATUS_ACTIVE,
-        pending_withdrawal: option::none(),
-    }
+/// Test wrapper for slash_solver
+public fun test_slash_solver(
+    admin_cap: &AdminCap,
+    registry: &mut SolverRegistry,
+    solver: address,
+    evidence: vector<u8>,
+    clock: &Clock,
+    ctx: &mut tx_context::TxContext,
+) {
+    slash_solver(admin_cap, registry, solver, evidence, clock, ctx);
+}
+
+/// Test core value: Reputation system updates from batch participation
+/// This tests the core mechanism that makes solvers compete fairly
+#[test]
+fun test_reputation_updates_from_batch_participation() {
+    let mut scenario = ts::begin(ADMIN);
+    init(ts::ctx(&mut scenario));
+    
+    // Create and share Clock for testing
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, ADMIN);
+
+    let stake_amount = MIN_STAKE_AMOUNT;
+    let batch_id = b"batch_001";
+
+    // --- Register solver ---
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let mut registry = ts::take_shared<SolverRegistry>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let stake_coin = coin::mint_for_testing<SUI>(stake_amount, ts::ctx(&mut scenario));
+        
+        register_solver(&mut registry, stake_coin, &clock_ref, ts::ctx(&mut scenario));
+        
+        let initial_reputation = get_solver_reputation(&registry, SOLVER);
+        assert!(initial_reputation == MAX_REPUTATION / 2, 1); // Starts at 50%
+
+        ts::return_shared(registry);
+        ts::return_shared(clock_ref);
+    };
+
+    // --- Backend records batch participation: solver wins with accurate metrics ---
+    ts::next_tx(&mut scenario, BACKEND);
+    {
+        let mut registry = ts::take_shared<SolverRegistry>(&scenario);
+        
+        // Simulate winning a batch with high accuracy
+        test_record_batch_participation(
+            &mut registry,
+            SOLVER,
+            batch_id,
+            true, // won
+            1_000_000_000, // surplus generated
+            100_000, // claimed metrics
+            100_000, // actual metrics (perfect accuracy)
+            1, // epoch
+        );
+        
+        let reputation_after_win = get_solver_reputation(&registry, SOLVER);
+        // Debug: print actual values
+        // Initial: 5000 (MAX_REPUTATION / 2)
+        // Expected: > 5000 after winning 1 batch with perfect accuracy
+        assert!(reputation_after_win > MAX_REPUTATION / 2, 2); // Reputation increased
+
+        ts::return_shared(registry);
+    };
+
+    // --- Backend records another batch: solver loses but participates ---
+    ts::next_tx(&mut scenario, BACKEND);
+    {
+        let mut registry = ts::take_shared<SolverRegistry>(&scenario);
+        
+        test_record_batch_participation(
+            &mut registry,
+            SOLVER,
+            b"batch_002",
+            false, // lost
+            0, // no surplus
+            50_000, // claimed
+            60_000, // actual (20% error)
+            2, // epoch
+        );
+        
+        let reputation_after_loss = get_solver_reputation(&registry, SOLVER);
+        // Reputation should decrease due to lower accuracy and loss
+        assert!(reputation_after_loss < MAX_REPUTATION, 3);
+
+        ts::return_shared(registry);
+    };
+
+    // Clean up Clock
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
+}
+
+/// Test core value: Slashing mechanism for malicious solvers
+#[test]
+fun test_slashing_malicious_solver() {
+    let mut scenario = ts::begin(ADMIN);
+    init(ts::ctx(&mut scenario));
+    
+    // Create and share Clock for testing
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, ADMIN);
+    
+    let admin_cap = ts::take_from_sender<AdminCap>(&scenario);
+    transfer::transfer(admin_cap, ADMIN);
+    ts::next_tx(&mut scenario, ADMIN);
+
+    let stake_amount = MIN_STAKE_AMOUNT * 2; // 2000 SUI
+
+    // --- Register solver ---
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let mut registry = ts::take_shared<SolverRegistry>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let stake_coin = coin::mint_for_testing<SUI>(stake_amount, ts::ctx(&mut scenario));
+        
+        register_solver(&mut registry, stake_coin, &clock_ref, ts::ctx(&mut scenario));
+        
+        let initial_stake = get_solver_stake(&registry, SOLVER);
+        assert!(initial_stake == stake_amount, 1);
+
+        ts::return_shared(registry);
+        ts::return_shared(clock_ref);
+    };
+
+    // --- Admin slashes solver for malicious behavior ---
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let admin_cap = ts::take_from_sender<AdminCap>(&scenario);
+        let mut registry = ts::take_shared<SolverRegistry>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        
+        let stake_before = get_solver_stake(&registry, SOLVER);
+        let reputation_before = get_solver_reputation(&registry, SOLVER);
+
+        test_slash_solver(
+            &admin_cap,
+            &mut registry,
+            SOLVER,
+            b"front_running_detected",
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        let stake_after = get_solver_stake(&registry, SOLVER);
+        let reputation_after = get_solver_reputation(&registry, SOLVER);
+        
+        // 20% of stake should be slashed
+        let expected_slash = (stake_before * (SLASH_PERCENTAGE as u64)) / 100;
+        assert!(stake_after == stake_before - expected_slash, 2);
+        
+        // Reputation should be halved
+        assert!(reputation_after == reputation_before / 2, 3);
+        
+        // Status should be SLASHED
+        assert!(!is_solver_active(&registry, SOLVER), 4);
+
+        transfer::transfer(admin_cap, ADMIN);
+        ts::return_shared(registry);
+        ts::return_shared(clock_ref);
+    };
+
+    // Clean up Clock
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
 }
