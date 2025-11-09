@@ -1,17 +1,21 @@
 # **INTENUS PROTOCOL - SYSTEM DESIGN DOCUMENT (SDD) v1.0**
-*Complete Technical Specification for All Teams*
+
+Complete Technical Specification for All Teams
 
 ---
 
 ## **1. EXECUTIVE SUMMARY**
 
 ### **What is Intenus?**
+
 Intent-based aggregation protocol on Sui that enables natural language DeFi execution through verifiable AI-powered routing with privacy preservation.
 
 ### **Core Principle**
+
 "Aggregate, don't compete" - We don't build new DEXs/lending protocols, we optimize routing across existing ones.
 
 ### **Key Innovations**
+
 1. Natural language → DeFi execution
 2. Solver freedom (no routing restrictions)
 3. AI ranking in TEE (verifiable & private)
@@ -50,6 +54,7 @@ Show Top 3 PTBs → User Signs → Execute on Sui
 **Purpose**: Manage solver staking, reputation, participation metrics, and rewards while keeping on-chain logic minimal.
 
 **State**:
+
 ```move
 SolverProfile {
     solver_address: address,
@@ -79,6 +84,7 @@ SolverRegistry {
 ```
 
 **Key Functions**:
+
 - `register_solver(registry, stake, clock, ctx)` – Entry; enforces min stake and emits `SolverRegistered`.
 - `increase_stake(registry, additional_stake, ctx)` – Entry; accumulates extra SUI into Balance.
 - `initiate_withdrawal(registry, amount, clock, ctx)` / `complete_withdrawal(...)` – Entry; 7-day cooldown + Balance split/transfer.
@@ -92,6 +98,7 @@ SolverRegistry {
 **Purpose**: Store policy references and access rules for Seal-encrypted data (intents, solver strategies, user histories). Enforcement relies on on-chain checks + off-chain Seal enforcement.
 
 **State**:
+
 ```move
 PolicyRegistry {
     id: UID,
@@ -134,6 +141,7 @@ UserHistoryPolicy {
 ```
 
 **Key Functions**:
+
 - `create_intent_policy(...)`, `create_solver_strategy_policy(...)`, `create_user_history_policy(...)` – Entry; create per-type policies and emit `PolicyCreated`.
 - `revoke_policy(registry, policy_type, policy_id, ctx)` – Entry; owner/admin revocation with event.
 - `auto_revoke_expired(registry, policy_type, policy_ids, clock)` – Entry; batch revoke after window expiry.
@@ -144,6 +152,7 @@ UserHistoryPolicy {
 **Purpose**: Maintain trusted measurement + attestation key for Router Optimizer enclave and log verified proofs emitted by backend.
 
 **State**:
+
 ```move
 TeeVerifier {
     id: UID,
@@ -167,6 +176,7 @@ AttestationRecord {
 ```
 
 **Verification Flow**:
+
 1. `submit_attestation_record(...)` ensures verifier configured, signature verified off-chain, measurement matches, timestamp fresh (<5 minutes).
 2. Store `AttestationRecord` keyed by batch and emit `AttestationVerified`.
 3. `rotate_attestation_key(...)` allows admin to update measurement/pubkey; emits `TrustedMeasurementRotated`.
@@ -176,6 +186,7 @@ AttestationRecord {
 **Purpose**: Minimal on-chain batch metadata tracker backing off-chain orchestration. No routing, matching, or scoring logic.
 
 **State**:
+
 ```move
 BatchRecord {
     batch_id: vector<u8>,
@@ -203,6 +214,7 @@ BatchManager {
 ```
 
 **Key Functions**:
+
 - `start_new_batch(admin_cap, manager, batch_id, clock)` – Entry; increments epoch, creates record, emits `BatchStarted`.
 - `record_intent(manager, epoch, additional_intents, additional_value)` – Friend; backend increments counts, emits `IntentRecorded`.
 - `close_batch(manager, epoch)` – Friend; transitions to ranking state.
@@ -230,11 +242,13 @@ BatchManager {
 ### **4.2 INTENT SERVICE**
 
 **Endpoints**:
+
 - `POST /intent/submit` - Natural language input
 - `GET /intent/{id}` - Intent status
 - `POST /intent/parse` - Test NLP parsing
 
 **Flow**:
+
 1. Receive natural language
 2. Call Python NLP Parser
 3. Encrypt with Seal (if private)
@@ -244,11 +258,13 @@ BatchManager {
 ### **4.3 BATCH SERVICE**
 
 **Batch Lifecycle**:
+
 ```
 OPEN (10s) → CLOSED → PUBLISHED → SOLVING (5s) → RANKING → READY → EXECUTED
 ```
 
 **Redis Pub/Sub Channels**:
+
 ```
 solver:batch:new        - New batch available
 solver:solution:{id}    - Solution submission
@@ -372,6 +388,7 @@ Features = {
 **Technology**: Rust + Nautilus Enclave + ONNX Runtime
 
 **Responsibilities**:
+
 1. Load encrypted intents from Walrus
 2. Decrypt with Seal (TEE has permission)
 3. Run ML inference
@@ -430,6 +447,7 @@ Attestation {
 ### **7.1 SOLVER FREEDOM**
 
 Solvers can implement ANY strategy:
+
 - Pure P2P matching
 - DEX aggregation
 - Hybrid approaches
@@ -475,6 +493,7 @@ interface SolutionSubmission {
 **Cost Savings**: 99.8% vs on-chain storage
 
 **Storage Structure**:
+
 ```
 /intents/{batch_id}/{intent_id}.json
 /solutions/{batch_id}/{solution_id}.json
@@ -486,12 +505,14 @@ interface SolutionSubmission {
 ### **8.2 SEAL ENCRYPTION**
 
 **When to Encrypt**:
+
 - Private intents (large trades)
 - User history data
 - Solver strategies
 - Training datasets
 
 **Access Control Timeline**:
+
 ```
 Intent: User → Solvers (batch window) → Router (ranking) → Revoked
 History: User (always) → Router (aggregated only)
@@ -531,30 +552,35 @@ Why: Best surplus + matches your preference
 ## **10. DEPLOYMENT PLAN**
 
 ### **Phase 1: Core Infrastructure (Weeks 1-2)**
+
 - [ ] Deploy Smart Contracts on testnet
 - [ ] Setup Kubernetes cluster
 - [ ] Configure Redis & PostgreSQL
 - [ ] Integrate Walrus & Seal
 
 ### **Phase 2: Backend Services (Weeks 3-4)**
+
 - [ ] NestJS microservices
 - [ ] NLP Parser integration
 - [ ] Batch orchestration
 - [ ] Solver SDK release
 
 ### **Phase 3: AI/ML Pipeline (Weeks 5-6)**
+
 - [ ] Train NLP model
 - [ ] Train ranking models
 - [ ] Export to ONNX
 - [ ] Setup training pipeline
 
 ### **Phase 4: TEE Integration (Weeks 7-8)**
+
 - [ ] Nautilus enclave setup
 - [ ] Router Optimizer in Rust
 - [ ] Attestation verification
 - [ ] End-to-end testing
 
 ### **Phase 5: Solver Onboarding (Weeks 9-10)**
+
 - [ ] Documentation
 - [ ] Reference implementation
 - [ ] Solver registration
@@ -565,30 +591,35 @@ Why: Best surplus + matches your preference
 ## **11. TEAM RESPONSIBILITIES**
 
 ### **Smart Contract Team**
+
 - Solver Registry
 - Seal Policies
 - TEE Verifier
 - Batch Manager
 
 ### **Backend Team**
+
 - NestJS services
 - Redis/PostgreSQL
 - Walrus integration
 - API/WebSocket
 
 ### **AI Team**
+
 - NLP Parser
 - ML models (PyTorch → ONNX)
 - Feature engineering
 - Training pipeline
 
 ### **TEE Team**
+
 - Router Optimizer (Rust)
 - Nautilus setup
 - ONNX inference
 - PTB builder
 
 ### **Frontend Team**
+
 - Chat interface
 - PTB preview
 - Wallet integration

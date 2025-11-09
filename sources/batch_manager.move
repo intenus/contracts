@@ -341,7 +341,6 @@ module intenus::batch_manager {
         {
             let admin_cap_ref = ts::take_from_sender<AdminCap>(&scenario);
             let mut manager = ts::take_shared<BatchManager>(&scenario);
-            // Clock is created automatically when first accessed in a transaction
             let clock_ref = ts::take_shared<Clock>(&scenario);
             
             start_new_batch(&admin_cap_ref, &mut manager, batch_id, &clock_ref);

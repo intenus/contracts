@@ -362,8 +362,6 @@ public(package) fun slash_solver(
     // Burn slashed tokens by creating a coin and burning it
     let slashed_balance = balance::split(stake_balance, slash_amount);
     let slashed_coin = coin::from_balance(slashed_balance, _ctx);
-    // In a real implementation, this would be burned via treasury or similar mechanism
-    // For testing, we'll transfer to a burn address (0x0)
     transfer::public_transfer(slashed_coin, @0x0);
 
     event::emit(SolverSlashed {
@@ -610,9 +608,6 @@ fun test_reputation_updates_from_batch_participation() {
         );
         
         let reputation_after_win = get_solver_reputation(&registry, SOLVER);
-        // Debug: print actual values
-        // Initial: 5000 (MAX_REPUTATION / 2)
-        // Expected: > 5000 after winning 1 batch with perfect accuracy
         assert!(reputation_after_win > MAX_REPUTATION / 2, 2); // Reputation increased
 
         ts::return_shared(registry);
