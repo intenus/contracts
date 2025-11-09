@@ -6,8 +6,8 @@ use sui::table::{Self, Table};
 
 // ===== ERRORS =====
 const E_NOT_CONFIGURED: u64 = 4001;
-const E_INVALID_ATTESTATION: u64 = 1004;
-const E_MEASUREMENT_MISMATCH: u64 = 1008;
+const E_INVALID_ATTESTATION: u64 = 4002;
+const E_MEASUREMENT_MISMATCH: u64 = 4003;
 const E_STALE_TIMESTAMP: u64 = 4004;
 const E_DUPLICATE_RECORD: u64 = 4005;
 
@@ -207,6 +207,157 @@ fun bytes_equal(left: &vector<u8>, right: &vector<u8>): bool {
 // ===== TEST HELPERS =====
 
 #[test_only]
+use sui::test_scenario::{Self as ts};
+
+#[test_only]
+const ADMIN: address = @0xA;
+#[test_only]
+const ROUTER: address = @0xB;
+
+#[test_only]
 public fun init_for_testing(ctx: &mut tx_context::TxContext) {
     init(ctx);
+}
+
+/// Test core value: TEE attestation verification for Router Optimizer
+/// This ensures only verified TEE enclaves can submit ranking proofs
+#[test]
+fun test_tee_attestation_verification() {
+    let mut scenario = ts::begin(ADMIN);
+    init(ts::ctx(&mut scenario));
+    
+    // Create and share Clock for testing
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, ADMIN);
+
+    // Initialize trusted measurement
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let admin_cap_ref = ts::take_from_sender<AdminCap>(&scenario);
+        let mut verifier = ts::take_shared<TeeVerifier>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        
+        let trusted_measurement = b"router_optimizer_v1_measurement_hash";
+        let version = b"1.0.0";
+        let pubkey = b"attestation_public_key_bytes";
+        
+        initialize_trusted_measurement(
+            &admin_cap_ref,
+            &mut verifier,
+            b"RouterOptimizer",
+            trusted_measurement,
+            version,
+            pubkey,
+            &clock_ref,
+        );
+        
+        transfer::transfer(admin_cap_ref, ADMIN);
+        ts::return_shared(verifier);
+        ts::return_shared(clock_ref);
+    };
+
+    // Submit valid attestation record
+    ts::next_tx(&mut scenario, ROUTER);
+    {
+        let mut verifier = ts::take_shared<TeeVerifier>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+        
+        let input_hash = b"batch_input_hash_32_bytes";
+        let output_hash = b"ranked_output_hash_32_bytes";
+        let measurement = b"router_optimizer_v1_measurement_hash";
+        
+        submit_attestation_record(
+            &mut verifier,
+            1, // batch_id
+            input_hash,
+            output_hash,
+            measurement,
+            now,
+            true, // signature verified off-chain
+            &clock_ref,
+        );
+        
+        // Verify record was stored
+        let has_record = get_attestation_record(&verifier, 1);
+        assert!(has_record, 1);
+        
+        ts::return_shared(verifier);
+        ts::return_shared(clock_ref);
+    };
+
+    // Clean up Clock
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
+}
+
+#[test]
+#[expected_failure(abort_code = E_MEASUREMENT_MISMATCH)]
+fun test_attestation_fails_wrong_measurement() {
+    let mut scenario = ts::begin(ADMIN);
+    init(ts::ctx(&mut scenario));
+    
+    // Create and share Clock for testing
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, ADMIN);
+
+    // Initialize with trusted measurement
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let admin_cap_ref = ts::take_from_sender<AdminCap>(&scenario);
+        let mut verifier = ts::take_shared<TeeVerifier>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        
+        initialize_trusted_measurement(
+            &admin_cap_ref,
+            &mut verifier,
+            b"RouterOptimizer",
+            b"trusted_measurement",
+            b"1.0.0",
+            b"pubkey",
+            &clock_ref,
+        );
+        
+        transfer::transfer(admin_cap_ref, ADMIN);
+        ts::return_shared(verifier);
+        ts::return_shared(clock_ref);
+    };
+
+    // Try to submit with wrong measurement (should fail)
+    ts::next_tx(&mut scenario, ROUTER);
+    {
+        let mut verifier = ts::take_shared<TeeVerifier>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+        
+        submit_attestation_record(
+            &mut verifier,
+            1,
+            b"input",
+            b"output",
+            b"wrong_measurement", // Wrong measurement
+            now,
+            true,
+            &clock_ref,
+        );
+        
+        ts::return_shared(verifier);
+        ts::return_shared(clock_ref);
+    };
+
+    // Clean up Clock
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
 }
