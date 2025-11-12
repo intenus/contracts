@@ -7,6 +7,8 @@ use sui::event;
 use sui::sui::SUI;
 use sui::table::{Self, Table};
 
+use intenus::slash_manager::{Self, SlashManager};
+
 // ===== ERRORS =====
 const E_INSUFFICIENT_STAKE: u64 = 1001;
 const E_SOLVER_NOT_REGISTERED: u64 = 1002;
@@ -17,7 +19,7 @@ const E_INSUFFICIENT_BALANCE: u64 = 1011;
 const E_NO_PENDING_WITHDRAWAL: u64 = 1012;
 
 // ===== CONSTANTS =====
-const MIN_STAKE_AMOUNT: u64 = 1_000_000_000_000; // 1000 SUI
+const MIN_STAKE_AMOUNT: u64 = 1_000_000_000; // 1 SUI (Just for testing)
 const WITHDRAWAL_COOLDOWN_MS: u64 = 604_800_000; // 7 days
 const SLASH_PERCENTAGE: u8 = 20; // 20%
 const REWARD_PERCENTAGE: u8 = 10; // 10%
@@ -138,7 +140,7 @@ public fun get_admin_cap_for_testing(ctx: &mut tx_context::TxContext): AdminCap 
     AdminCap { id: object::new(ctx) }
 }
 
-// ===== ENTRY FUNCTIONS (User-facing) =====
+// ===== ENTRY FUNCTIONS =====
 
 /// Register as a solver with initial stake
 public fun register_solver(
@@ -242,9 +244,10 @@ public fun initiate_withdrawal(
 /// Complete withdrawal after cooldown period
 public fun complete_withdrawal(
     registry: &mut SolverRegistry,
+    slash_manager: &SlashManager,
     amount: u64,
     clock: &Clock,
-    ctx: &mut tx_context::TxContext,
+    ctx: &mut TxContext,
 ): Coin<SUI> {
     let solver_address = tx_context::sender(ctx);
     let timestamp = clock::timestamp_ms(clock);
@@ -261,6 +264,19 @@ public fun complete_withdrawal(
 
     // Check if cooldown period has passed
     assert!(timestamp >= available_at, E_COOLDOWN_NOT_COMPLETE);
+    
+    // Calculate total slash percentage directly from slash_manager
+    let slash_percentage_bps = slash_manager::calculate_total_slash_percentage(
+        slash_manager,
+        solver_address
+    );
+    
+    // Apply slash if any
+    let final_amount = if (slash_percentage_bps > 0) {
+        amount - (amount * slash_percentage_bps / 10000)
+    } else {
+        amount
+    };
 
     // Update profile
     profile.stake_amount = profile.stake_amount - amount;
@@ -269,15 +285,24 @@ public fun complete_withdrawal(
 
     // Withdraw from balance
     let stake_balance = table::borrow_mut(&mut registry.stakes, solver_address);
-    let withdrawal_balance = balance::split(stake_balance, amount);
+    let withdrawal_balance = balance::split(stake_balance, final_amount);
     let withdrawal_coin = coin::from_balance(withdrawal_balance, ctx);
+    
+    // If there was a slash, burn the slashed portion
+    if (slash_percentage_bps > 0) {
+        let slashed_amount = amount - final_amount;
+        let slashed_balance = balance::split(stake_balance, slashed_amount);
+        let slashed_coin = coin::from_balance(slashed_balance, ctx);
+        transfer::public_transfer(slashed_coin, @0x0); // Burn
+    };
 
-    // Transfer to solver
+    // Transfer withdrawal to solver
     event::emit(WithdrawalCompleted {
         solver: solver_address,
-        amount,
+        amount: final_amount,
         timestamp,
     });
+    
     withdrawal_coin
 }
 
