@@ -17,8 +17,17 @@ const E_UNAUTHORIZED_SOLVER: u64 = 6006;
 const E_POLICY_VALIDATION_FAILED: u64 = 6007;
 const E_INTENT_EXPIRED: u64 = 6008;
 
-// ===== STRUCTS =====
+// ===== CONSTANTS =====
+const STATUS_PENDING: u8 = 0;
+const STATUS_BEST_SOLUTION_SELECTED: u8 = 1;
+const STATUS_SOLUTION_REJECTED: u8 = 2;
+const STATUS_SOLUTION_ACCEPTED: u8 = 3;
+const STATUS_SOLUTION_VALIDATED: u8 = 4;
+const STATUS_SOLUTION_INVALIDATED: u8 = 5;
+const STATUS_SOLUTION_EXPIRED: u8 = 6;
+const STATUS_SOLUTION_CANCELLED: u8 = 7;
 
+// ===== STRUCTS =====
 /// Admin capability for registry management
 public struct AdminCap has key, store {
     id: UID,
@@ -48,22 +57,21 @@ public struct PolicyParams has copy, drop, store {
 }
 
 /// Intent object submitted by users
-public struct Intent has store {
-    intent_id: vector<u8>,
-    user_address: address,
-    created_time: u64,
+public struct Intent has key, store {
+    id: UID,
     blob_id: vector<u8>,
-    batch_id: u64,
+    best_solution_id: Option<ID>,
+    pending_solutions: vector<ID>,
     policy: PolicyParams,
-    is_active: bool,
+    created_ts: u64,
+    status: u8,
 }
 
 /// Solution object submitted by solvers
-public struct Solution has store {
-    solution_id: vector<u8>,
-    intent_id: vector<u8>,
-    solver_address: address,
-    created_time: u64,
+public struct Solution has key, store {
+    id: UID,
+    intent_id: ID,
+    created_ts: u64,
     blob_id: vector<u8>,
     is_validated: bool,
 }
