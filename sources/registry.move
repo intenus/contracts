@@ -2,29 +2,25 @@ module intenus::registry;
 
 use sui::clock::{Self, Clock};
 use sui::event;
-use sui::table::{Self, Table};
-use intenus::seal_policy_coordinator::{Self, PolicyRegistry};
 use intenus::solver_registry::{Self, SolverRegistry};
-use intenus::batch_manager::{Self, BatchManager};
 
 // ===== ERRORS =====
-const E_INTENT_NOT_FOUND: u64 = 6001;
-const E_INTENT_ALREADY_EXISTS: u64 = 6002;
-const E_SOLUTION_NOT_FOUND: u64 = 6003;
-const E_SOLUTION_ALREADY_EXISTS: u64 = 6004;
-const E_INVALID_BLOB_ID: u64 = 6005;
-const E_UNAUTHORIZED_SOLVER: u64 = 6006;
-const E_POLICY_VALIDATION_FAILED: u64 = 6007;
-const E_INTENT_EXPIRED: u64 = 6008;
+const E_INVALID_BLOB_ID: u64 = 6001;
+const E_UNAUTHORIZED_SOLVER: u64 = 6002;
+const E_POLICY_VALIDATION_FAILED: u64 = 6003;
+const E_INTENT_REVOKED: u64 = 6004;
+const E_UNAUTHORIZED: u64 = 6005;
+const E_INVALID_TIME_WINDOW: u64 = 6006;
+const E_SOLUTION_ALREADY_SELECTED: u64 = 6007;
+
+// ===== CONSTANTS =====
+const STATUS_PENDING: u8 = 0;
+const STATUS_BEST_SOLUTION_SELECTED: u8 = 1;
+const STATUS_REVOKED: u8 = 2;
 
 // ===== STRUCTS =====
 
-/// Admin capability for registry management
-public struct AdminCap has key, store {
-    id: UID,
-}
-
-/// Time window for access control
+/// Time window for solver access control
 public struct TimeWindow has copy, drop, store {
     start_ms: u64,
     end_ms: u64,
@@ -47,98 +43,72 @@ public struct PolicyParams has copy, drop, store {
     access_condition: AccessCondition,
 }
 
-/// Intent object submitted by users
-public struct Intent has store {
-    intent_id: vector<u8>,
+/// Intent object submitted by users (owned object)
+public struct Intent has key, store {
+    id: UID,
     user_address: address,
-    created_time: u64,
+    created_ts: u64,
     blob_id: vector<u8>,
-    batch_id: u64,
     policy: PolicyParams,
-    is_active: bool,
+    status: u8,
+    best_solution_id: Option<ID>,
+    pending_solutions: vector<ID>,
 }
 
-/// Solution object submitted by solvers
-public struct Solution has store {
-    solution_id: vector<u8>,
-    intent_id: vector<u8>,
+/// Solution object submitted by solvers (owned object)
+public struct Solution has key, store {
+    id: UID,
+    intent_id: ID,
     solver_address: address,
-    created_time: u64,
+    created_ts: u64,
     blob_id: vector<u8>,
     is_validated: bool,
-}
-
-/// Main registry for managing intents and solutions
-public struct Registry has key {
-    id: UID,
-    intents: Table<vector<u8>, Intent>,
-    solutions: Table<vector<u8>, Solution>,
-    intent_to_solutions: Table<vector<u8>, vector<vector<u8>>>, // Maps intent_id -> solution_ids
-    total_intents: u64,
-    total_solutions: u64,
-    admin: address,
 }
 
 // ===== EVENTS =====
 
 public struct IntentSubmitted has copy, drop {
-    intent_id: vector<u8>,
+    intent_id: ID,
     user_address: address,
-    batch_id: u64,
     blob_id: vector<u8>,
-    created_time: u64,
+    created_ts: u64,
     solver_access_start: u64,
     solver_access_end: u64,
 }
 
 public struct IntentRevoked has copy, drop {
-    intent_id: vector<u8>,
+    intent_id: ID,
     user_address: address,
     revoked_at: u64,
 }
 
 public struct SolutionSubmitted has copy, drop {
-    solution_id: vector<u8>,
-    intent_id: vector<u8>,
+    solution_id: ID,
+    intent_id: ID,
     solver_address: address,
     blob_id: vector<u8>,
-    created_time: u64,
+    created_ts: u64,
 }
 
 public struct SolutionValidated has copy, drop {
-    solution_id: vector<u8>,
-    intent_id: vector<u8>,
+    solution_id: ID,
+    intent_id: ID,
     solver_address: address,
     validated_at: u64,
 }
 
-// ===== INITIALIZATION =====
-
-fun init(ctx: &mut TxContext) {
-    let admin_cap = AdminCap { id: object::new(ctx) };
-
-    let registry = Registry {
-        id: object::new(ctx),
-        intents: table::new(ctx),
-        solutions: table::new(ctx),
-        intent_to_solutions: table::new(ctx),
-        total_intents: 0,
-        total_solutions: 0,
-        admin: tx_context::sender(ctx),
-    };
-
-    transfer::transfer(admin_cap, tx_context::sender(ctx));
-    transfer::share_object(registry);
+public struct BestSolutionSelected has copy, drop {
+    intent_id: ID,
+    solution_id: ID,
+    user_address: address,
+    selected_at: u64,
 }
 
 // ===== ENTRY FUNCTIONS =====
 
 /// Submit a new intent with embedded policy parameters
+/// Creates an Intent object and transfers it to the user
 public entry fun submit_intent(
-    registry: &mut Registry,
-    batch_manager: &mut BatchManager,
-    intent_id: vector<u8>,
-    batch_id: u64,
     blob_id: vector<u8>,
     solver_access_start_ms: u64,
     solver_access_end_ms: u64,
@@ -156,16 +126,18 @@ public entry fun submit_intent(
     let timestamp = clock::timestamp_ms(clock);
 
     // Validate input
-    assert!(!table::contains(&registry.intents, intent_id), E_INTENT_ALREADY_EXISTS);
     assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
+    assert!(solver_access_start_ms < solver_access_end_ms, E_INVALID_TIME_WINDOW);
 
     // Create intent with embedded policy
+    let intent_uid = object::new(ctx);
+    let intent_id = object::uid_to_inner(&intent_uid);
+
     let intent = Intent {
-        intent_id,
+        id: intent_uid,
         user_address: sender,
-        created_time: timestamp,
+        created_ts: timestamp,
         blob_id,
-        batch_id,
         policy: PolicyParams {
             solver_access_window: TimeWindow {
                 start_ms: solver_access_start_ms,
@@ -181,36 +153,31 @@ public entry fun submit_intent(
                 purpose,
             },
         },
-        is_active: true,
+        status: STATUS_PENDING,
+        best_solution_id: option::none(),
+        pending_solutions: vector::empty(),
     };
-
-    // Store intent
-    table::add(&mut registry.intents, intent_id, intent);
-    table::add(&mut registry.intent_to_solutions, intent_id, vector::empty());
-    registry.total_intents = registry.total_intents + 1;
-
-    // Record intent in batch manager
-    batch_manager::record_intent(batch_manager, batch_id, 1, 0);
 
     // Emit event
     event::emit(IntentSubmitted {
         intent_id,
         user_address: sender,
-        batch_id,
-        blob_id,
-        created_time: timestamp,
+        blob_id: intent.blob_id,
+        created_ts: timestamp,
         solver_access_start: solver_access_start_ms,
         solver_access_end: solver_access_end_ms,
     });
+
+    // Transfer intent to user
+    transfer::public_transfer(intent, sender);
 }
 
 /// Submit a solution for an intent with policy validation
+/// Creates a Solution object and transfers it to the solver
+/// Also registers the solution with the Intent
 public entry fun submit_solution(
-    registry: &mut Registry,
-    batch_manager: &mut BatchManager,
+    intent: &mut Intent,
     solver_registry: &SolverRegistry,
-    solution_id: vector<u8>,
-    intent_id: vector<u8>,
     blob_id: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext,
@@ -219,44 +186,36 @@ public entry fun submit_solution(
     let timestamp = clock::timestamp_ms(clock);
 
     // Validate inputs
-    assert!(!table::contains(&registry.solutions, solution_id), E_SOLUTION_ALREADY_EXISTS);
-    assert!(table::contains(&registry.intents, intent_id), E_INTENT_NOT_FOUND);
     assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
-
-    let intent = table::borrow(&registry.intents, intent_id);
-    assert!(intent.is_active, E_INTENT_EXPIRED);
+    assert!(intent.status != STATUS_REVOKED, E_INTENT_REVOKED);
 
     // Validate policy conditions
-    validate_solution_against_policy(intent, solver, timestamp, solver_registry, clock);
+    validate_solution_against_policy(intent, solver, timestamp, solver_registry);
 
     // Create solution
+    let solution_uid = object::new(ctx);
+    let solution_id = object::uid_to_inner(&solution_uid);
+    let intent_id = object::uid_to_inner(&intent.id);
+
     let solution = Solution {
-        solution_id,
+        id: solution_uid,
         intent_id,
         solver_address: solver,
-        created_time: timestamp,
+        created_ts: timestamp,
         blob_id,
         is_validated: true,
     };
 
-    // Store solution
-    table::add(&mut registry.solutions, solution_id, solution);
-
-    // Link solution to intent
-    let solutions_list = table::borrow_mut(&mut registry.intent_to_solutions, intent_id);
-    vector::push_back(solutions_list, solution_id);
-    registry.total_solutions = registry.total_solutions + 1;
-
-    // Record solution in batch manager
-    batch_manager::record_solution(batch_manager, intent.batch_id);
+    // Register solution with intent
+    vector::push_back(&mut intent.pending_solutions, solution_id);
 
     // Emit events
     event::emit(SolutionSubmitted {
         solution_id,
         intent_id,
         solver_address: solver,
-        blob_id,
-        created_time: timestamp,
+        blob_id: solution.blob_id,
+        created_ts: timestamp,
     });
 
     event::emit(SolutionValidated {
@@ -265,27 +224,60 @@ public entry fun submit_solution(
         solver_address: solver,
         validated_at: timestamp,
     });
+
+    // Transfer solution to solver
+    transfer::public_transfer(solution, solver);
 }
 
-/// Revoke an intent (only owner can revoke)
-public entry fun revoke_intent(
-    registry: &mut Registry,
-    intent_id: vector<u8>,
+/// Select the best solution for an intent (only owner can select)
+public entry fun select_best_solution(
+    intent: &mut Intent,
+    solution_id: ID,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     let sender = tx_context::sender(ctx);
     let timestamp = clock::timestamp_ms(clock);
 
-    assert!(table::contains(&registry.intents, intent_id), E_INTENT_NOT_FOUND);
+    // Verify sender is the intent owner
+    assert!(intent.user_address == sender, E_UNAUTHORIZED);
+    assert!(intent.status == STATUS_PENDING, E_SOLUTION_ALREADY_SELECTED);
 
-    let intent = table::borrow_mut(&mut registry.intents, intent_id);
-    assert!(intent.user_address == sender || sender == registry.admin, E_UNAUTHORIZED_SOLVER);
+    // Verify solution is in pending list
+    assert!(vector::contains(&intent.pending_solutions, &solution_id), E_UNAUTHORIZED_SOLVER);
 
-    intent.is_active = false;
+    // Update intent
+    intent.status = STATUS_BEST_SOLUTION_SELECTED;
+    intent.best_solution_id = option::some(solution_id);
 
+    // Emit event
+    event::emit(BestSolutionSelected {
+        intent_id: object::uid_to_inner(&intent.id),
+        solution_id,
+        user_address: sender,
+        selected_at: timestamp,
+    });
+}
+
+/// Revoke an intent (only owner can revoke)
+public entry fun revoke_intent(
+    intent: &mut Intent,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let sender = tx_context::sender(ctx);
+    let timestamp = clock::timestamp_ms(clock);
+
+    // Verify sender is the intent owner
+    assert!(intent.user_address == sender, E_UNAUTHORIZED);
+    assert!(intent.status == STATUS_PENDING, E_UNAUTHORIZED);
+
+    // Update status
+    intent.status = STATUS_REVOKED;
+
+    // Emit event
     event::emit(IntentRevoked {
-        intent_id,
+        intent_id: object::uid_to_inner(&intent.id),
         user_address: sender,
         revoked_at: timestamp,
     });
@@ -294,13 +286,12 @@ public entry fun revoke_intent(
 // ===== INTERNAL HELPER FUNCTIONS (DRY PRINCIPLE) =====
 
 /// Validate solution submission against intent policy
-/// This reuses logic from seal_policy_coordinator
+/// Reuses logic patterns from seal_policy_coordinator
 fun validate_solution_against_policy(
     intent: &Intent,
     solver: address,
     timestamp: u64,
     solver_registry: &SolverRegistry,
-    clock: &Clock,
 ) {
     let policy = &intent.policy;
 
@@ -328,56 +319,61 @@ fun validate_solution_against_policy(
     // For now, we assume the blob_id contains the attestation proof
 }
 
-/// Check if a solution exists for an intent
-fun has_solution(registry: &Registry, intent_id: &vector<u8>): bool {
-    if (!table::contains(&registry.intent_to_solutions, *intent_id)) {
-        return false
-    };
-    let solutions = table::borrow(&registry.intent_to_solutions, *intent_id);
-    vector::length(solutions) > 0
-}
-
-/// Get solution count for an intent
-fun get_solution_count(registry: &Registry, intent_id: &vector<u8>): u64 {
-    if (!table::contains(&registry.intent_to_solutions, *intent_id)) {
-        return 0
-    };
-    let solutions = table::borrow(&registry.intent_to_solutions, *intent_id);
-    vector::length(solutions)
-}
-
 // ===== VIEW FUNCTIONS =====
 
-/// Get intent details
-public fun get_intent(registry: &Registry, intent_id: vector<u8>): Option<Intent> {
-    if (table::contains(&registry.intents, intent_id)) {
-        option::some(*table::borrow(&registry.intents, intent_id))
-    } else {
-        option::none()
-    }
+/// Get intent ID
+public fun get_intent_id(intent: &Intent): ID {
+    object::uid_to_inner(&intent.id)
 }
 
-/// Get solution details
-public fun get_solution(registry: &Registry, solution_id: vector<u8>): Option<Solution> {
-    if (table::contains(&registry.solutions, solution_id)) {
-        option::some(*table::borrow(&registry.solutions, solution_id))
-    } else {
-        option::none()
-    }
+/// Get intent user address
+public fun get_intent_user(intent: &Intent): address {
+    intent.user_address
 }
 
-/// Get all solutions for an intent
-public fun get_intent_solutions(registry: &Registry, intent_id: vector<u8>): vector<vector<u8>> {
-    if (table::contains(&registry.intent_to_solutions, intent_id)) {
-        *table::borrow(&registry.intent_to_solutions, intent_id)
-    } else {
-        vector::empty()
-    }
+/// Get intent status
+public fun get_intent_status(intent: &Intent): u8 {
+    intent.status
 }
 
-/// Get registry statistics
-public fun get_registry_stats(registry: &Registry): (u64, u64) {
-    (registry.total_intents, registry.total_solutions)
+/// Get intent blob_id
+public fun get_intent_blob_id(intent: &Intent): vector<u8> {
+    intent.blob_id
+}
+
+/// Get intent best solution id
+public fun get_intent_best_solution(intent: &Intent): Option<ID> {
+    intent.best_solution_id
+}
+
+/// Get intent pending solutions
+public fun get_intent_pending_solutions(intent: &Intent): vector<ID> {
+    intent.pending_solutions
+}
+
+/// Get solution ID
+public fun get_solution_id(solution: &Solution): ID {
+    object::uid_to_inner(&solution.id)
+}
+
+/// Get solution intent ID
+public fun get_solution_intent_id(solution: &Solution): ID {
+    solution.intent_id
+}
+
+/// Get solution solver address
+public fun get_solution_solver(solution: &Solution): address {
+    solution.solver_address
+}
+
+/// Get solution blob_id
+public fun get_solution_blob_id(solution: &Solution): vector<u8> {
+    solution.blob_id
+}
+
+/// Check if solution is validated
+public fun is_solution_validated(solution: &Solution): bool {
+    solution.is_validated
 }
 
 // ===== TEST HELPERS =====
@@ -396,39 +392,18 @@ const USER: address = @0xB;
 #[test_only]
 const SOLVER: address = @0xC;
 
-#[test_only]
-public fun init_for_testing(ctx: &mut TxContext) {
-    init(ctx);
-}
-
 /// Test core value: Complete intent-solution lifecycle
 #[test]
 fun test_intent_solution_lifecycle() {
     let mut scenario = ts::begin(ADMIN);
 
-    // Initialize all required modules
-    init(ts::ctx(&mut scenario));
+    // Initialize solver registry
     solver_registry::init_for_testing(ts::ctx(&mut scenario));
-    batch_manager::init_for_testing(ts::ctx(&mut scenario));
 
     // Create and share Clock
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));
     clock.share_for_testing();
     ts::next_tx(&mut scenario, ADMIN);
-
-    // Start a batch
-    ts::next_tx(&mut scenario, ADMIN);
-    {
-        let admin_cap = ts::take_from_sender<batch_manager::AdminCap>(&scenario);
-        let mut batch_mgr = ts::take_shared<BatchManager>(&scenario);
-        let clock_ref = ts::take_shared<Clock>(&scenario);
-
-        batch_manager::start_new_batch(&admin_cap, &mut batch_mgr, b"batch_001", &clock_ref);
-
-        transfer::transfer(admin_cap, ADMIN);
-        ts::return_shared(batch_mgr);
-        ts::return_shared(clock_ref);
-    };
 
     // Register solver
     ts::next_tx(&mut scenario, SOLVER);
@@ -449,16 +424,10 @@ fun test_intent_solution_lifecycle() {
     // User submits intent
     ts::next_tx(&mut scenario, USER);
     {
-        let mut registry = ts::take_shared<Registry>(&scenario);
-        let mut batch_mgr = ts::take_shared<BatchManager>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            &mut registry,
-            &mut batch_mgr,
-            b"intent_001",
-            1, // batch_id
             b"blob_intent_data",
             now, // solver_access_start
             now + 10_000, // solver_access_end
@@ -473,42 +442,48 @@ fun test_intent_solution_lifecycle() {
             ts::ctx(&mut scenario),
         );
 
-        let (total_intents, _) = get_registry_stats(&registry);
-        assert!(total_intents == 1, 1);
-
-        ts::return_shared(registry);
-        ts::return_shared(batch_mgr);
         ts::return_shared(clock_ref);
     };
 
     // Solver submits solution
     ts::next_tx(&mut scenario, SOLVER);
     {
-        let mut registry = ts::take_shared<Registry>(&scenario);
-        let mut batch_mgr = ts::take_shared<BatchManager>(&scenario);
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
         let solver_reg = ts::take_shared<SolverRegistry>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
 
         submit_solution(
-            &mut registry,
-            &mut batch_mgr,
+            &mut intent,
             &solver_reg,
-            b"solution_001",
-            b"intent_001",
             b"blob_solution_data",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
 
-        let (_, total_solutions) = get_registry_stats(&registry);
-        assert!(total_solutions == 1, 2);
+        // Check solution was registered
+        let pending = get_intent_pending_solutions(&intent);
+        assert!(vector::length(&pending) == 1, 1);
 
-        let solutions = get_intent_solutions(&registry, b"intent_001");
-        assert!(vector::length(&solutions) == 1, 3);
-
-        ts::return_shared(registry);
-        ts::return_shared(batch_mgr);
+        ts::return_to_sender(&scenario, intent);
         ts::return_shared(solver_reg);
+        ts::return_shared(clock_ref);
+    };
+
+    // User selects best solution
+    ts::next_tx(&mut scenario, USER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        let pending = get_intent_pending_solutions(&intent);
+        let solution_id = *vector::borrow(&pending, 0);
+
+        select_best_solution(&mut intent, solution_id, &clock_ref, ts::ctx(&mut scenario));
+
+        assert!(get_intent_status(&intent) == STATUS_BEST_SOLUTION_SELECTED, 2);
+        assert!(option::is_some(&get_intent_best_solution(&intent)), 3);
+
+        ts::return_to_sender(&scenario, intent);
         ts::return_shared(clock_ref);
     };
 
@@ -528,42 +503,20 @@ fun test_intent_solution_lifecycle() {
 fun test_unregistered_solver_fails() {
     let mut scenario = ts::begin(ADMIN);
 
-    // Initialize modules
-    init(ts::ctx(&mut scenario));
+    // Initialize solver registry
     solver_registry::init_for_testing(ts::ctx(&mut scenario));
-    batch_manager::init_for_testing(ts::ctx(&mut scenario));
 
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));
     clock.share_for_testing();
     ts::next_tx(&mut scenario, ADMIN);
 
-    // Start batch
-    ts::next_tx(&mut scenario, ADMIN);
-    {
-        let admin_cap = ts::take_from_sender<batch_manager::AdminCap>(&scenario);
-        let mut batch_mgr = ts::take_shared<BatchManager>(&scenario);
-        let clock_ref = ts::take_shared<Clock>(&scenario);
-
-        batch_manager::start_new_batch(&admin_cap, &mut batch_mgr, b"batch_001", &clock_ref);
-
-        transfer::transfer(admin_cap, ADMIN);
-        ts::return_shared(batch_mgr);
-        ts::return_shared(clock_ref);
-    };
-
     // User submits intent requiring solver registration
     ts::next_tx(&mut scenario, USER);
     {
-        let mut registry = ts::take_shared<Registry>(&scenario);
-        let mut batch_mgr = ts::take_shared<BatchManager>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            &mut registry,
-            &mut batch_mgr,
-            b"intent_001",
-            1,
             b"blob_data",
             now,
             now + 10_000,
@@ -578,38 +531,87 @@ fun test_unregistered_solver_fails() {
             ts::ctx(&mut scenario),
         );
 
-        ts::return_shared(registry);
-        ts::return_shared(batch_mgr);
         ts::return_shared(clock_ref);
     };
 
     // Unregistered solver tries to submit solution (should fail)
     ts::next_tx(&mut scenario, SOLVER);
     {
-        let mut registry = ts::take_shared<Registry>(&scenario);
-        let mut batch_mgr = ts::take_shared<BatchManager>(&scenario);
+        let mut intent = ts::take_from_address<Intent>(&scenario, USER);
         let solver_reg = ts::take_shared<SolverRegistry>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
 
         submit_solution(
-            &mut registry,
-            &mut batch_mgr,
+            &mut intent,
             &solver_reg,
-            b"solution_001",
-            b"intent_001",
             b"blob_solution",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
 
-        ts::return_shared(registry);
-        ts::return_shared(batch_mgr);
+        transfer::public_transfer(intent, USER);
         ts::return_shared(solver_reg);
         ts::return_shared(clock_ref);
     };
 
     // Cleanup
     ts::next_tx(&mut scenario, ADMIN);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
+}
+
+/// Test intent revocation
+#[test]
+fun test_intent_revocation() {
+    let mut scenario = ts::begin(USER);
+
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, USER);
+
+    // User submits intent
+    {
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+
+        submit_intent(
+            b"blob_data",
+            now,
+            now + 10_000,
+            true,
+            now + 86_400_000,
+            false,
+            0,
+            false,
+            vector::empty(),
+            b"test",
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        ts::return_shared(clock_ref);
+    };
+
+    // User revokes intent
+    ts::next_tx(&mut scenario, USER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        revoke_intent(&mut intent, &clock_ref, ts::ctx(&mut scenario));
+
+        assert!(get_intent_status(&intent) == STATUS_REVOKED, 1);
+
+        ts::return_to_sender(&scenario, intent);
+        ts::return_shared(clock_ref);
+    };
+
+    // Cleanup
+    ts::next_tx(&mut scenario, USER);
     {
         let clock = ts::take_shared<Clock>(&scenario);
         clock.destroy_for_testing();
