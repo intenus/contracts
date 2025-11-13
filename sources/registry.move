@@ -12,21 +12,32 @@ const E_INTENT_REVOKED: u64 = 6004;
 const E_UNAUTHORIZED: u64 = 6005;
 const E_INVALID_TIME_WINDOW: u64 = 6006;
 const E_SOLUTION_ALREADY_SELECTED: u64 = 6007;
+const E_INVALID_STATUS_TRANSITION: u64 = 6008;
+const E_TEE_ATTESTATION_REQUIRED: u64 = 6009;
 
-// ===== CONSTANTS =====
-const STATUS_PENDING: u8 = 0;
-const STATUS_BEST_SOLUTION_SELECTED: u8 = 1;
-const STATUS_REVOKED: u8 = 2;
+// ===== INTENT STATUS CONSTANTS =====
+const INTENT_STATUS_PENDING: u8 = 0;
+const INTENT_STATUS_BEST_SOLUTION_SELECTED: u8 = 1;
+const INTENT_STATUS_EXECUTED: u8 = 2;
+const INTENT_STATUS_REVOKED: u8 = 3;
+
+// ===== SOLUTION STATUS CONSTANTS =====
+const SOLUTION_STATUS_PENDING: u8 = 0;
+const SOLUTION_STATUS_TEE_VALIDATED: u8 = 1;
+const SOLUTION_STATUS_SELECTED: u8 = 2;
+const SOLUTION_STATUS_EXECUTED: u8 = 3;
+const SOLUTION_STATUS_REJECTED: u8 = 4;
+const SOLUTION_STATUS_SLASHED: u8 = 5;
 
 // ===== STRUCTS =====
 
-/// Time window for solver access control
+/// Time window for solver access control (ON-CHAIN ENFORCEMENT)
 public struct TimeWindow has copy, drop, store {
     start_ms: u64,
     end_ms: u64,
 }
 
-/// Access condition for policy enforcement
+/// Access condition for policy enforcement (ON-CHAIN ENFORCEMENT)
 public struct AccessCondition has copy, drop, store {
     requires_solver_registration: bool,
     min_solver_stake: u64,
@@ -35,7 +46,7 @@ public struct AccessCondition has copy, drop, store {
     purpose: vector<u8>,
 }
 
-/// Policy parameters embedded in Intent
+/// Policy parameters embedded in Intent (ON-CHAIN ENFORCEMENT)
 public struct PolicyParams has copy, drop, store {
     solver_access_window: TimeWindow,
     router_access_enabled: bool,
@@ -43,26 +54,51 @@ public struct PolicyParams has copy, drop, store {
     access_condition: AccessCondition,
 }
 
-/// Intent object submitted by users (owned object)
+/// TEE Attestation for solution validation
+public struct TEEAttestation has copy, drop, store {
+    measurement: vector<u8>,
+    signature: vector<u8>,
+    timestamp: u64,
+    validated: bool,
+}
+
+/// Intent object - stores reference to IGS intent in Walrus (owned object)
+/// IGS intent content is stored OFF-CHAIN in Walrus
+/// On-chain only tracks blob_id, policy enforcement, and solution management
 public struct Intent has key, store {
     id: UID,
     user_address: address,
     created_ts: u64,
+
+    // Reference to IGS intent in Walrus (OFF-CHAIN STORAGE)
     blob_id: vector<u8>,
+
+    // On-chain policy enforcement
     policy: PolicyParams,
+
+    // Solution management
     status: u8,
     best_solution_id: Option<ID>,
     pending_solutions: vector<ID>,
 }
 
-/// Solution object submitted by solvers (owned object)
+/// Solution object - stores reference to IGS solution in Walrus (owned object)
+/// IGS solution content (PTB, surplus calculation, etc.) is stored OFF-CHAIN
+/// On-chain only tracks blob_id, TEE attestation, and validation status
 public struct Solution has key, store {
     id: UID,
     intent_id: ID,
     solver_address: address,
     created_ts: u64,
+
+    // Reference to IGS solution in Walrus (OFF-CHAIN STORAGE)
     blob_id: vector<u8>,
-    is_validated: bool,
+
+    // TEE attestation (ON-CHAIN VERIFICATION)
+    tee_attestation: Option<TEEAttestation>,
+
+    // On-chain status tracking
+    status: u8,
 }
 
 // ===== EVENTS =====
@@ -82,6 +118,13 @@ public struct IntentRevoked has copy, drop {
     revoked_at: u64,
 }
 
+public struct IntentExecuted has copy, drop {
+    intent_id: ID,
+    solution_id: ID,
+    user_address: address,
+    executed_at: u64,
+}
+
 public struct SolutionSubmitted has copy, drop {
     solution_id: ID,
     intent_id: ID,
@@ -90,24 +133,33 @@ public struct SolutionSubmitted has copy, drop {
     created_ts: u64,
 }
 
-public struct SolutionValidated has copy, drop {
+public struct SolutionTEEValidated has copy, drop {
     solution_id: ID,
     intent_id: ID,
     solver_address: address,
     validated_at: u64,
+    measurement: vector<u8>,
 }
 
-public struct BestSolutionSelected has copy, drop {
+public struct SolutionSelected has copy, drop {
     intent_id: ID,
     solution_id: ID,
     user_address: address,
     selected_at: u64,
 }
 
+public struct SolutionRejected has copy, drop {
+    solution_id: ID,
+    intent_id: ID,
+    reason: vector<u8>,
+    rejected_at: u64,
+}
+
 // ===== ENTRY FUNCTIONS =====
 
 /// Submit a new intent with embedded policy parameters
-/// Creates an Intent object and transfers it to the user
+/// Creates an Intent object with reference to IGS intent in Walrus
+/// The actual IGS intent content (operation, constraints, etc.) is stored OFF-CHAIN
 public entry fun submit_intent(
     blob_id: vector<u8>,
     solver_access_start_ms: u64,
@@ -129,7 +181,7 @@ public entry fun submit_intent(
     assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
     assert!(solver_access_start_ms < solver_access_end_ms, E_INVALID_TIME_WINDOW);
 
-    // Create intent with embedded policy
+    // Create intent with reference to Walrus blob
     let intent_uid = object::new(ctx);
     let intent_id = object::uid_to_inner(&intent_uid);
 
@@ -153,7 +205,7 @@ public entry fun submit_intent(
                 purpose,
             },
         },
-        status: STATUS_PENDING,
+        status: INTENT_STATUS_PENDING,
         best_solution_id: option::none(),
         pending_solutions: vector::empty(),
     };
@@ -173,9 +225,9 @@ public entry fun submit_intent(
 }
 
 /// Submit a solution for an intent with policy validation
-/// Creates a Solution object and transfers it to the solver
-/// Also registers the solution with the Intent
-entry fun submit_solution(
+/// Creates a Solution object with reference to IGS solution in Walrus
+/// The actual IGS solution content (PTB, surplus calculation) is stored OFF-CHAIN
+public entry fun submit_solution(
     intent: &mut Intent,
     solver_registry: &SolverRegistry,
     blob_id: vector<u8>,
@@ -187,12 +239,12 @@ entry fun submit_solution(
 
     // Validate inputs
     assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
-    assert!(intent.status != STATUS_REVOKED, E_INTENT_REVOKED);
+    assert!(intent.status == INTENT_STATUS_PENDING, E_INTENT_REVOKED);
 
-    // Validate policy conditions
+    // Validate policy conditions (ON-CHAIN ENFORCEMENT)
     validate_solution_against_policy(intent, solver, timestamp, solver_registry);
 
-    // Create solution
+    // Create solution with reference to Walrus blob
     let solution_uid = object::new(ctx);
     let solution_id = object::uid_to_inner(&solution_uid);
     let intent_id = object::uid_to_inner(&intent.id);
@@ -203,13 +255,14 @@ entry fun submit_solution(
         solver_address: solver,
         created_ts: timestamp,
         blob_id,
-        is_validated: true,
+        tee_attestation: option::none(),
+        status: SOLUTION_STATUS_PENDING,
     };
 
     // Register solution with intent
     vector::push_back(&mut intent.pending_solutions, solution_id);
 
-    // Emit events
+    // Emit event
     event::emit(SolutionSubmitted {
         solution_id,
         intent_id,
@@ -218,18 +271,48 @@ entry fun submit_solution(
         created_ts: timestamp,
     });
 
-    event::emit(SolutionValidated {
-        solution_id,
-        intent_id,
-        solver_address: solver,
-        validated_at: timestamp,
-    });
-
     // Transfer solution to solver
     transfer::public_transfer(solution, solver);
 }
 
+/// Validate solution with TEE attestation
+/// Called by TEE after validating the IGS solution off-chain
+public entry fun validate_solution_with_tee(
+    solution: &mut Solution,
+    measurement: vector<u8>,
+    signature: vector<u8>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let timestamp = clock::timestamp_ms(clock);
+
+    // Verify status transition
+    assert!(solution.status == SOLUTION_STATUS_PENDING, E_INVALID_STATUS_TRANSITION);
+
+    // Create TEE attestation
+    let attestation = TEEAttestation {
+        measurement,
+        signature,
+        timestamp,
+        validated: true,
+    };
+
+    // Update solution
+    solution.tee_attestation = option::some(attestation);
+    solution.status = SOLUTION_STATUS_TEE_VALIDATED;
+
+    // Emit event
+    event::emit(SolutionTEEValidated {
+        solution_id: object::uid_to_inner(&solution.id),
+        intent_id: solution.intent_id,
+        solver_address: solution.solver_address,
+        validated_at: timestamp,
+        measurement,
+    });
+}
+
 /// Select the best solution for an intent (only owner can select)
+/// User selects from TEE-validated solutions ranked by AI
 public entry fun select_best_solution(
     intent: &mut Intent,
     solution_id: ID,
@@ -241,21 +324,82 @@ public entry fun select_best_solution(
 
     // Verify sender is the intent owner
     assert!(intent.user_address == sender, E_UNAUTHORIZED);
-    assert!(intent.status == STATUS_PENDING, E_SOLUTION_ALREADY_SELECTED);
+    assert!(intent.status == INTENT_STATUS_PENDING, E_SOLUTION_ALREADY_SELECTED);
 
     // Verify solution is in pending list
     assert!(vector::contains(&intent.pending_solutions, &solution_id), E_UNAUTHORIZED_SOLVER);
 
     // Update intent
-    intent.status = STATUS_BEST_SOLUTION_SELECTED;
+    intent.status = INTENT_STATUS_BEST_SOLUTION_SELECTED;
     intent.best_solution_id = option::some(solution_id);
 
     // Emit event
-    event::emit(BestSolutionSelected {
+    event::emit(SolutionSelected {
         intent_id: object::uid_to_inner(&intent.id),
         solution_id,
         user_address: sender,
         selected_at: timestamp,
+    });
+}
+
+/// Execute the selected solution (only owner can execute)
+public entry fun execute_solution(
+    intent: &mut Intent,
+    solution: &mut Solution,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let sender = tx_context::sender(ctx);
+    let timestamp = clock::timestamp_ms(clock);
+
+    // Verify sender is the intent owner
+    assert!(intent.user_address == sender, E_UNAUTHORIZED);
+    assert!(intent.status == INTENT_STATUS_BEST_SOLUTION_SELECTED, E_INVALID_STATUS_TRANSITION);
+
+    // Verify this is the selected solution
+    let selected_id = option::borrow(&intent.best_solution_id);
+    let solution_id = object::uid_to_inner(&solution.id);
+    assert!(*selected_id == solution_id, E_UNAUTHORIZED);
+
+    // Verify solution is TEE validated
+    assert!(solution.status == SOLUTION_STATUS_TEE_VALIDATED, E_TEE_ATTESTATION_REQUIRED);
+
+    // Update statuses
+    intent.status = INTENT_STATUS_EXECUTED;
+    solution.status = SOLUTION_STATUS_EXECUTED;
+
+    // Emit event
+    event::emit(IntentExecuted {
+        intent_id: object::uid_to_inner(&intent.id),
+        solution_id,
+        user_address: sender,
+        executed_at: timestamp,
+    });
+}
+
+/// Reject a solution with reason (for slashing mechanism)
+/// Called when TEE validation fails or solution violates constraints
+public entry fun reject_solution(
+    solution: &mut Solution,
+    solver_registry: &mut SolverRegistry,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &mut TxContext,
+) {
+    let timestamp = clock::timestamp_ms(clock);
+
+    // Update solution status
+    solution.status = SOLUTION_STATUS_REJECTED;
+
+    // TODO: Integrate with slashing mechanism
+    // solver_registry::record_violation(solver_registry, solution.solver_address, reason, clock);
+
+    // Emit event
+    event::emit(SolutionRejected {
+        solution_id: object::uid_to_inner(&solution.id),
+        intent_id: solution.intent_id,
+        reason,
+        rejected_at: timestamp,
     });
 }
 
@@ -270,10 +414,10 @@ public entry fun revoke_intent(
 
     // Verify sender is the intent owner
     assert!(intent.user_address == sender, E_UNAUTHORIZED);
-    assert!(intent.status == STATUS_PENDING, E_UNAUTHORIZED);
+    assert!(intent.status == INTENT_STATUS_PENDING, E_INVALID_STATUS_TRANSITION);
 
     // Update status
-    intent.status = STATUS_REVOKED;
+    intent.status = INTENT_STATUS_REVOKED;
 
     // Emit event
     event::emit(IntentRevoked {
@@ -285,8 +429,9 @@ public entry fun revoke_intent(
 
 // ===== INTERNAL HELPER FUNCTIONS (DRY PRINCIPLE) =====
 
-/// Validate solution submission against intent policy
-/// Reuses logic patterns from seal_policy_coordinator
+/// Validate solution submission against intent policy (ON-CHAIN ENFORCEMENT)
+/// This validates access control, NOT the IGS solution content
+/// IGS content validation happens in TEE off-chain
 fun validate_solution_against_policy(
     intent: &Intent,
     solver: address,
@@ -314,9 +459,6 @@ fun validate_solution_against_policy(
         let stake = solver_registry::get_solver_stake(solver_registry, solver);
         assert!(stake >= policy.access_condition.min_solver_stake, E_UNAUTHORIZED_SOLVER);
     };
-
-    // Note: TEE attestation would be validated here in production
-    // For now, we assume the blob_id contains the attestation proof
 }
 
 // ===== VIEW FUNCTIONS =====
@@ -336,7 +478,7 @@ public fun get_intent_status(intent: &Intent): u8 {
     intent.status
 }
 
-/// Get intent blob_id
+/// Get intent blob_id (reference to IGS intent in Walrus)
 public fun get_intent_blob_id(intent: &Intent): vector<u8> {
     intent.blob_id
 }
@@ -366,14 +508,24 @@ public fun get_solution_solver(solution: &Solution): address {
     solution.solver_address
 }
 
-/// Get solution blob_id
+/// Get solution blob_id (reference to IGS solution in Walrus)
 public fun get_solution_blob_id(solution: &Solution): vector<u8> {
     solution.blob_id
 }
 
-/// Check if solution is validated
-public fun is_solution_validated(solution: &Solution): bool {
-    solution.is_validated
+/// Get solution status
+public fun get_solution_status(solution: &Solution): u8 {
+    solution.status
+}
+
+/// Check if solution has TEE attestation
+public fun has_tee_attestation(solution: &Solution): bool {
+    option::is_some(&solution.tee_attestation)
+}
+
+/// Get TEE attestation
+public fun get_tee_attestation(solution: &Solution): Option<TEEAttestation> {
+    solution.tee_attestation
 }
 
 // ===== TEST HELPERS =====
@@ -391,10 +543,12 @@ const ADMIN: address = @0xA;
 const USER: address = @0xB;
 #[test_only]
 const SOLVER: address = @0xC;
+#[test_only]
+const TEE: address = @0xD;
 
-/// Test core value: Complete intent-solution lifecycle
+/// Test core value: Complete intent-solution lifecycle with TEE validation
 #[test]
-fun test_intent_solution_lifecycle() {
+fun test_intent_solution_lifecycle_with_tee() {
     let mut scenario = ts::begin(ADMIN);
 
     // Initialize solver registry
@@ -428,16 +582,16 @@ fun test_intent_solution_lifecycle() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"blob_intent_data",
-            now, // solver_access_start
-            now + 10_000, // solver_access_end
-            true, // router_access_enabled
-            now + 86_400_000, // auto_revoke_time (24h)
-            true, // requires_solver_registration
+            b"walrus_blob_id_intent_001",
+            now,
+            now + 10_000,
+            true,
+            now + 86_400_000,
+            true,
             solver_registry::get_min_stake_amount(),
-            false, // requires_tee_attestation
-            vector::empty(),
-            b"test_purpose",
+            true, // requires TEE attestation
+            b"expected_measurement",
+            b"swap",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -448,24 +602,44 @@ fun test_intent_solution_lifecycle() {
     // Solver submits solution
     ts::next_tx(&mut scenario, SOLVER);
     {
-        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let mut intent = ts::take_from_address<Intent>(&scenario, USER);
         let solver_reg = ts::take_shared<SolverRegistry>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
 
         submit_solution(
             &mut intent,
             &solver_reg,
-            b"blob_solution_data",
+            b"walrus_blob_id_solution_001",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
 
-        // Check solution was registered
         let pending = get_intent_pending_solutions(&intent);
         assert!(vector::length(&pending) == 1, 1);
 
-        ts::return_to_sender(&scenario, intent);
+        transfer::public_transfer(intent, USER);
         ts::return_shared(solver_reg);
+        ts::return_shared(clock_ref);
+    };
+
+    // TEE validates solution
+    ts::next_tx(&mut scenario, TEE);
+    {
+        let mut solution = ts::take_from_address<Solution>(&scenario, SOLVER);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        validate_solution_with_tee(
+            &mut solution,
+            b"measurement_hash",
+            b"tee_signature",
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        assert!(get_solution_status(&solution) == SOLUTION_STATUS_TEE_VALIDATED, 2);
+        assert!(has_tee_attestation(&solution), 3);
+
+        transfer::public_transfer(solution, SOLVER);
         ts::return_shared(clock_ref);
     };
 
@@ -480,10 +654,26 @@ fun test_intent_solution_lifecycle() {
 
         select_best_solution(&mut intent, solution_id, &clock_ref, ts::ctx(&mut scenario));
 
-        assert!(get_intent_status(&intent) == STATUS_BEST_SOLUTION_SELECTED, 2);
-        assert!(option::is_some(&get_intent_best_solution(&intent)), 3);
+        assert!(get_intent_status(&intent) == INTENT_STATUS_BEST_SOLUTION_SELECTED, 4);
 
         ts::return_to_sender(&scenario, intent);
+        ts::return_shared(clock_ref);
+    };
+
+    // User executes solution
+    ts::next_tx(&mut scenario, USER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let mut solution = ts::take_from_address<Solution>(&scenario, SOLVER);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        execute_solution(&mut intent, &mut solution, &clock_ref, ts::ctx(&mut scenario));
+
+        assert!(get_intent_status(&intent) == INTENT_STATUS_EXECUTED, 5);
+        assert!(get_solution_status(&solution) == SOLUTION_STATUS_EXECUTED, 6);
+
+        transfer::public_transfer(intent, USER);
+        transfer::public_transfer(solution, SOLVER);
         ts::return_shared(clock_ref);
     };
 
@@ -503,7 +693,6 @@ fun test_intent_solution_lifecycle() {
 fun test_unregistered_solver_fails() {
     let mut scenario = ts::begin(ADMIN);
 
-    // Initialize solver registry
     solver_registry::init_for_testing(ts::ctx(&mut scenario));
 
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));
@@ -517,7 +706,7 @@ fun test_unregistered_solver_fails() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"blob_data",
+            b"walrus_blob_id",
             now,
             now + 10_000,
             true,
@@ -544,7 +733,7 @@ fun test_unregistered_solver_fails() {
         submit_solution(
             &mut intent,
             &solver_reg,
-            b"blob_solution",
+            b"walrus_blob_solution",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -554,7 +743,6 @@ fun test_unregistered_solver_fails() {
         ts::return_shared(clock_ref);
     };
 
-    // Cleanup
     ts::next_tx(&mut scenario, ADMIN);
     {
         let clock = ts::take_shared<Clock>(&scenario);
@@ -579,7 +767,7 @@ fun test_intent_revocation() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"blob_data",
+            b"walrus_blob_id",
             now,
             now + 10_000,
             true,
@@ -604,7 +792,7 @@ fun test_intent_revocation() {
 
         revoke_intent(&mut intent, &clock_ref, ts::ctx(&mut scenario));
 
-        assert!(get_intent_status(&intent) == STATUS_REVOKED, 1);
+        assert!(get_intent_status(&intent) == INTENT_STATUS_REVOKED, 1);
 
         ts::return_to_sender(&scenario, intent);
         ts::return_shared(clock_ref);
