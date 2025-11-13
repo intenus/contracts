@@ -3,6 +3,7 @@ module intenus::registry;
 use sui::clock::{Self, Clock};
 use sui::event;
 use intenus::solver_registry::{Self, SolverRegistry};
+use intenus::tee_verifier::{Self, TeeVerifier};
 
 // ===== ERRORS =====
 const E_INVALID_BLOB_ID: u64 = 6001;
@@ -93,6 +94,10 @@ public struct Solution has key, store {
 
     // Reference to IGS solution in Walrus (OFF-CHAIN STORAGE)
     blob_id: vector<u8>,
+
+    // Hashes for TEE verification
+    input_hash: vector<u8>,   // Hash of input data (intent + constraints)
+    output_hash: vector<u8>,  // Hash of output data (solution + surplus)
 
     // TEE attestation (ON-CHAIN VERIFICATION)
     tee_attestation: Option<TEEAttestation>,
@@ -231,6 +236,8 @@ public entry fun submit_solution(
     intent: &mut Intent,
     solver_registry: &SolverRegistry,
     blob_id: vector<u8>,
+    input_hash: vector<u8>,
+    output_hash: vector<u8>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -239,6 +246,8 @@ public entry fun submit_solution(
 
     // Validate inputs
     assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
+    assert!(vector::length(&input_hash) > 0, E_INVALID_BLOB_ID);
+    assert!(vector::length(&output_hash) > 0, E_INVALID_BLOB_ID);
     assert!(intent.status == INTENT_STATUS_PENDING, E_INTENT_REVOKED);
 
     // Validate policy conditions (ON-CHAIN ENFORCEMENT)
@@ -255,6 +264,8 @@ public entry fun submit_solution(
         solver_address: solver,
         created_ts: timestamp,
         blob_id,
+        input_hash,
+        output_hash,
         tee_attestation: option::none(),
         status: SOLUTION_STATUS_PENDING,
     };
@@ -277,10 +288,15 @@ public entry fun submit_solution(
 
 /// Validate solution with TEE attestation
 /// Called by TEE after validating the IGS solution off-chain
+/// SECURITY CRITICAL: Verifies attestation using tee_verifier module
 public entry fun validate_solution_with_tee(
     solution: &mut Solution,
+    intent: &Intent,
+    tee_verifier: &mut TeeVerifier,
     measurement: vector<u8>,
     signature: vector<u8>,
+    attestation_timestamp: u64,
+    signature_verified: bool,  // Signature verification done off-chain by client
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -289,11 +305,40 @@ public entry fun validate_solution_with_tee(
     // Verify status transition
     assert!(solution.status == SOLUTION_STATUS_PENDING, E_INVALID_STATUS_TRANSITION);
 
-    // Create TEE attestation
+    // SECURITY: Verify solution belongs to this intent
+    assert!(solution.intent_id == object::uid_to_inner(&intent.id), E_UNAUTHORIZED);
+
+    // SECURITY: Verify measurement matches expected measurement in Intent policy
+    let expected_measurement = &intent.policy.access_condition.expected_measurement;
+    if (vector::length(expected_measurement) > 0) {
+        assert!(bytes_equal(&measurement, expected_measurement), E_POLICY_VALIDATION_FAILED);
+    };
+
+    // SECURITY: Submit attestation record to TEE verifier for verification
+    // This verifies:
+    // - Signature is valid (signature_verified must be true)
+    // - Measurement matches trusted measurement in TeeVerifier
+    // - Timestamp is fresh (not stale)
+    // Use solution_id as batch_id for tracking
+    let solution_id_bytes = object::id_to_bytes(&object::uid_to_inner(&solution.id));
+    let batch_id = bytes_to_u64(&solution_id_bytes);
+
+    tee_verifier::submit_attestation_record(
+        tee_verifier,
+        batch_id,
+        solution.input_hash,
+        solution.output_hash,
+        measurement,
+        attestation_timestamp,
+        signature_verified,
+        clock,
+    );
+
+    // Create TEE attestation after successful verification
     let attestation = TEEAttestation {
         measurement,
         signature,
-        timestamp,
+        timestamp: attestation_timestamp,
         validated: true,
     };
 
@@ -461,6 +506,39 @@ fun validate_solution_against_policy(
     };
 }
 
+/// Compare two byte vectors for equality
+fun bytes_equal(left: &vector<u8>, right: &vector<u8>): bool {
+    if (vector::length(left) != vector::length(right)) {
+        return false
+    };
+    let len = vector::length(left);
+    let mut i = 0;
+    while (i < len) {
+        if (*vector::borrow(left, i) != *vector::borrow(right, i)) {
+            return false
+        };
+        i = i + 1;
+    };
+    true
+}
+
+/// Convert first 8 bytes of vector to u64 (for batch_id)
+fun bytes_to_u64(bytes: &vector<u8>): u64 {
+    let len = vector::length(bytes);
+    if (len == 0) return 0;
+
+    let mut result: u64 = 0;
+    let mut i = 0;
+    let max = if (len < 8) { len } else { 8 };
+
+    while (i < max) {
+        let byte = *vector::borrow(bytes, i);
+        result = result | ((byte as u64) << ((i * 8) as u8));
+        i = i + 1;
+    };
+    result
+}
+
 // ===== VIEW FUNCTIONS =====
 
 /// Get intent ID
@@ -551,13 +629,36 @@ const TEE: address = @0xD;
 fun test_intent_solution_lifecycle_with_tee() {
     let mut scenario = ts::begin(ADMIN);
 
-    // Initialize solver registry
+    // Initialize solver registry and tee_verifier
     solver_registry::init_for_testing(ts::ctx(&mut scenario));
+    tee_verifier::init_for_testing(ts::ctx(&mut scenario));
 
     // Create and share Clock
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));
     clock.share_for_testing();
     ts::next_tx(&mut scenario, ADMIN);
+
+    // Initialize TEE verifier with trusted measurement
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let admin_cap = ts::take_from_sender<tee_verifier::AdminCap>(&scenario);
+        let mut tee_ver = ts::take_shared<TeeVerifier>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        tee_verifier::initialize_trusted_measurement(
+            &admin_cap,
+            &mut tee_ver,
+            b"Nautilus_IGS_Validator",
+            b"expected_measurement",
+            b"1.0.0",
+            b"tee_pubkey",
+            &clock_ref,
+        );
+
+        transfer::transfer(admin_cap, ADMIN);
+        ts::return_shared(tee_ver);
+        ts::return_shared(clock_ref);
+    };
 
     // Register solver
     ts::next_tx(&mut scenario, SOLVER);
@@ -610,6 +711,8 @@ fun test_intent_solution_lifecycle_with_tee() {
             &mut intent,
             &solver_reg,
             b"walrus_blob_id_solution_001",
+            b"input_hash_32_bytes",  // input_hash
+            b"output_hash_32_bytes", // output_hash
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -626,12 +729,19 @@ fun test_intent_solution_lifecycle_with_tee() {
     ts::next_tx(&mut scenario, TEE);
     {
         let mut solution = ts::take_from_address<Solution>(&scenario, SOLVER);
+        let intent = ts::take_from_address<Intent>(&scenario, USER);
+        let mut tee_ver = ts::take_shared<TeeVerifier>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
 
         validate_solution_with_tee(
             &mut solution,
-            b"measurement_hash",
+            &intent,
+            &mut tee_ver,
+            b"expected_measurement",  // matches trusted measurement
             b"tee_signature",
+            now,  // attestation_timestamp
+            true, // signature_verified (done off-chain)
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -640,6 +750,8 @@ fun test_intent_solution_lifecycle_with_tee() {
         assert!(has_tee_attestation(&solution), 3);
 
         transfer::public_transfer(solution, SOLVER);
+        transfer::public_transfer(intent, USER);
+        ts::return_shared(tee_ver);
         ts::return_shared(clock_ref);
     };
 
@@ -734,6 +846,8 @@ fun test_unregistered_solver_fails() {
             &mut intent,
             &solver_reg,
             b"walrus_blob_solution",
+            b"input_hash",
+            b"output_hash",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
