@@ -62,6 +62,7 @@ public struct TEEAttestation has copy, drop, store {
     validated: bool,
 }
 
+
 /// Intent object - stores reference to IGS intent in Walrus (owned object)
 /// IGS intent content is stored OFF-CHAIN in Walrus
 /// On-chain only tracks blob_id, policy enforcement, and solution management
@@ -262,7 +263,7 @@ public entry fun submit_solution(
         tee_attestation: option::none(),
         status: SOLUTION_STATUS_PENDING,
     };
-
+ 
     // Register solution with intent
     vector::push_back(&mut intent.pending_solutions, solution_id);
 
