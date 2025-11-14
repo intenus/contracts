@@ -1,535 +1,254 @@
 module intenus::seal_policy_coordinator;
 
+use intenus::registry::{Self, Intent, Solution, TimeWindow, AccessCondition, PolicyParams};
 use intenus::solver_registry;
 use sui::clock::{Self, Clock};
 use sui::event;
-use sui::table::{Self, Table};
 
 // ===== ERRORS =====
-const E_POLICY_EXISTS: u64 = 3001;
-const E_POLICY_NOT_FOUND: u64 = 3002;
-const E_INVALID_TIME_WINDOW: u64 = 3003;
-const E_UNAUTHORIZED: u64 = 3004;
-const E_POLICY_REVOKED: u64 = 3005;
+const E_INTENT_REVOKED: u64 = 3001;
+const E_UNAUTHORIZED: u64 = 3002;
+const E_OUTSIDE_TIME_WINDOW: u64 = 3003;
+const E_SOLVER_NOT_REGISTERED: u64 = 3004;
+const E_INSUFFICIENT_STAKE: u64 = 3005;
+const E_ATTESTATION_REQUIRED: u64 = 3006;
+const E_NO_ENCLAVE_PK: u64 = 3007;
 
 // ===== CONSTANTS =====
-const POLICY_TYPE_INTENT: u8 = 0;
-const POLICY_TYPE_STRATEGY: u8 = 1;
-const POLICY_TYPE_USER_HISTORY: u8 = 2;
-
 const ROLE_USER: u8 = 0;
 const ROLE_SOLVER: u8 = 1;
 const ROLE_ROUTER: u8 = 2;
-const ROLE_ADMIN: u8 = 3;
 
 // ===== STRUCTS =====
 
-/// Capability for administrative overrides.
-public struct AdminCap has key, store {
+/// Enclave configuration for seal approval
+/// Stores the public key of the trusted enclave that has blanket access
+public struct EnclaveConfig has key {
     id: UID,
-}
-
-public struct TimeWindow has copy, drop, store {
-    start_ms: u64,
-    end_ms: u64,
-}
-
-public struct AccessCondition has copy, drop, store {
-    requires_solver_registration: bool,
-    min_solver_stake: u64,
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-}
-
-public struct IntentPolicy has store {
-    policy_id: vector<u8>,
-    batch_id: u64,
-    user_address: address,
-    solver_access_window: TimeWindow,
-    router_access_enabled: bool,
-    auto_revoke_time: u64,
-    is_revoked: bool,
-    access_condition: AccessCondition,
-}
-
-public struct SolverStrategyPolicy has store {
-    policy_id: vector<u8>,
-    solver_address: address,
-    router_can_access: bool,
-    admin_unlock_time: u64,
-    is_public: bool,
-    is_revoked: bool,
-    access_condition: AccessCondition,
-}
-
-public struct UserHistoryPolicy has store {
-    policy_id: vector<u8>,
-    user_address: address,
-    router_access_level: u8,
-    user_can_revoke: bool,
-    last_updated: u64,
-    is_revoked: bool,
-    access_condition: AccessCondition,
-}
-
-public struct PolicyRegistry has key {
-    id: UID,
-    intent_policies: Table<vector<u8>, IntentPolicy>,
-    strategy_policies: Table<vector<u8>, SolverStrategyPolicy>,
-    history_policies: Table<vector<u8>, UserHistoryPolicy>,
-    admin: address,
+    /// Enclave's public key (ed25519)
+    enclave_pk: vector<u8>,
+    /// Admin address who can update the enclave_pk
+    admin_addr: address,
 }
 
 // ===== EVENTS =====
 
-public struct PolicyCreated has copy, drop {
-    policy_id: vector<u8>,
-    policy_type: u8,
-    owner: address,
+public struct IntentAccessGranted has copy, drop {
+    intent_id: ID,
+    requester_addr: address,
+    granted_at_ms: u64,
 }
 
-public struct PolicyRevoked has copy, drop {
-    policy_id: vector<u8>,
-    policy_type: u8,
-    revoked_by: address,
+public struct SolutionAccessGranted has copy, drop {
+    solution_id: ID,
+    intent_id: ID,
+    requester_addr: address,
+    granted_at_ms: u64,
 }
 
-public struct PolicyAutoRevoked has copy, drop {
-    policy_id: vector<u8>,
-    policy_type: u8,
-    timestamp: u64,
+public struct EnclaveConfigUpdated has copy, drop {
+    new_enclave_pk: vector<u8>,
+    updated_at_ms: u64,
 }
 
 // ===== INITIALIZATION =====
 
 fun init(ctx: &mut TxContext) {
-    let admin_cap = AdminCap { id: object::new(ctx) };
-
-    let registry = PolicyRegistry {
+    let config = EnclaveConfig {
         id: object::new(ctx),
-        intent_policies: table::new(ctx),
-        strategy_policies: table::new(ctx),
-        history_policies: table::new(ctx),
-        admin: tx_context::sender(ctx),
+        enclave_pk: vector::empty<u8>(),
+        admin_addr: tx_context::sender(ctx),
     };
+    transfer::share_object(config);
+}
 
-    transfer::transfer(admin_cap, tx_context::sender(ctx));
-    transfer::share_object(registry);
+// ===== ADMIN FUNCTIONS =====
+
+/// Update enclave public key
+public entry fun update_enclave_pk(
+    config: &mut EnclaveConfig,
+    new_enclave_pk: vector<u8>,
+    clock: &Clock,
+    ctx: &TxContext,
+) {
+    assert!(tx_context::sender(ctx) == config.admin_addr, E_UNAUTHORIZED);
+    config.enclave_pk = new_enclave_pk;
+
+    event::emit(EnclaveConfigUpdated {
+        new_enclave_pk,
+        updated_at_ms: clock::timestamp_ms(clock),
+    });
 }
 
 // ===== SEAL APPROVE ENTRYPOINTS =====
 
 /// Seal entry point to approve access to an Intent.
-/// This is a read-only function that aborts if access is denied.
+/// Following Nautilus pattern: approves if called by enclave public key.
+/// Also checks standard access control (user, solver, router permissions).
 #[allow(lint(public_entry))]
 public entry fun seal_approve_intent(
-    id: vector<u8>,
-    registry: &PolicyRegistry,
+    intent: &Intent,
+    config: &EnclaveConfig,
     solver_registry_ref: &solver_registry::SolverRegistry,
     clock: &Clock,
     ctx: &TxContext,
 ) {
-    let policy_id = id;
-    let requester = tx_context::sender(ctx);
+    let requester_addr = tx_context::sender(ctx);
 
-    assert!(table::contains(&registry.intent_policies, policy_id), E_POLICY_NOT_FOUND);
-    let policy = table::borrow(&registry.intent_policies, policy_id);
-    assert!(!policy.is_revoked, E_POLICY_REVOKED);
+    // Check if requester is the enclave (has blanket access)
+    if (is_enclave_caller(requester_addr, config)) {
+        event::emit(IntentAccessGranted {
+            intent_id: object::id(intent),
+            requester_addr,
+            granted_at_ms: clock::timestamp_ms(clock),
+        });
+        return
+    };
 
-    let now = clock::timestamp_ms(clock);
-    assert!(policy.auto_revoke_time == 0 || now <= policy.auto_revoke_time, E_POLICY_REVOKED);
+    // Check if intent is revoked
+    assert!(!registry::is_intent_revoked(intent), E_INTENT_REVOKED);
 
-    let role = get_requester_role(registry, solver_registry_ref, requester);
+    let policy = registry::get_intent_policy(intent);
+    let access_condition = registry::get_policy_access_condition(policy);
+    let solver_access_window = registry::get_policy_solver_window(policy);
+    let router_access_enabled = registry::is_router_access_enabled(policy);
 
-    let is_authorized = if (
-        policy.access_condition.requires_solver_registration && role != ROLE_SOLVER && role != ROLE_ADMIN
-    ) {
-        // If solver is required, and requester is neither solver nor admin, deny immediately.
-        false
-    } else if (role == ROLE_ADMIN) {
-        true // Admin has blanket access
-    } else if (requester == policy.user_address && role == ROLE_USER) {
-        // Owner can access only if they are acting as a USER and solver is not required.
-        // If a solver is required, this path is bypassed by the check above.
+    // Determine role
+    let role = get_requester_role(solver_registry_ref, requester_addr);
+
+    // Check authorization based on role
+    let is_authorized = if (role == ROLE_USER && requester_addr == registry::get_intent_user(intent)) {
+        // Intent owner has access
         true
     } else if (role == ROLE_SOLVER) {
-        // Check time window
-        let in_window =
-            now >= policy.solver_access_window.start_ms && now <= policy.solver_access_window.end_ms;
-        if (!in_window) { false } else {
-            // Check solver status if required
-            if (!policy.access_condition.requires_solver_registration) { true } else {
-                let is_active = solver_registry::is_solver_active(solver_registry_ref, requester);
-                let stake = solver_registry::get_solver_stake(solver_registry_ref, requester);
-                is_active && stake >= policy.access_condition.min_solver_stake
-            }
-        }
+        check_solver_access(
+            requester_addr,
+            solver_registry_ref,
+            solver_access_window,
+            access_condition,
+            clock,
+        )
     } else if (role == ROLE_ROUTER) {
-        policy.router_access_enabled
+        router_access_enabled
     } else {
         false
     };
 
     assert!(is_authorized, E_UNAUTHORIZED);
+
+    event::emit(IntentAccessGranted {
+        intent_id: object::id(intent),
+        requester_addr,
+        granted_at_ms: clock::timestamp_ms(clock),
+    });
 }
 
-/// Seal entry point to approve access to a Solver's Strategy.
-/// This is a read-only function that aborts if access is denied.
+/// Seal entry point to approve access to a Solution.
+/// Following Nautilus pattern: approves if called by enclave public key.
+/// Also checks if requester is the solution owner.
 #[allow(lint(public_entry))]
-public entry fun seal_approve_strategy(
-    id: vector<u8>,
-    registry: &PolicyRegistry,
-    solver_registry_ref: &solver_registry::SolverRegistry,
+public entry fun seal_approve_solution(
+    solution: &Solution,
+    config: &EnclaveConfig,
     clock: &Clock,
     ctx: &TxContext,
 ) {
-    let policy_id = id;
-    let requester = tx_context::sender(ctx);
+    let requester_addr = tx_context::sender(ctx);
 
-    assert!(table::contains(&registry.strategy_policies, policy_id), E_POLICY_NOT_FOUND);
-    let policy = table::borrow(&registry.strategy_policies, policy_id);
-    assert!(!policy.is_revoked, E_POLICY_REVOKED);
-
-    let role = get_requester_role(registry, solver_registry_ref, requester);
-
-    let is_authorized = if (policy.is_public) {
-        true
-    } else if (role == ROLE_SOLVER && requester == policy.solver_address) {
-        true // Owner can always access
-    } else if (role == ROLE_ADMIN && clock::timestamp_ms(clock) >= policy.admin_unlock_time) {
-        true // Admin can access after unlock time
-    } else if (role == ROLE_ROUTER && policy.router_can_access) {
-        true // Router access if enabled
-    } else {
-        false
+    // Check if requester is the enclave (has blanket access)
+    if (is_enclave_caller(requester_addr, config)) {
+        event::emit(SolutionAccessGranted {
+            solution_id: object::id(solution),
+            intent_id: registry::get_solution_intent_id(solution),
+            requester_addr,
+            granted_at_ms: clock::timestamp_ms(clock),
+        });
+        return
     };
 
+    // Check if requester is the solution owner
+    let is_authorized = requester_addr == registry::get_solution_solver(solution);
     assert!(is_authorized, E_UNAUTHORIZED);
-}
 
-/// Seal entry point to approve access to User History data.
-/// This is a read-only function that aborts if access is denied.
-#[allow(lint(public_entry))]
-public entry fun seal_approve_history(
-    id: vector<u8>,
-    registry: &PolicyRegistry,
-    solver_registry_ref: &solver_registry::SolverRegistry,
-    ctx: &TxContext,
-) {
-    let policy_id = id;
-    let requester = tx_context::sender(ctx);
-
-    assert!(table::contains(&registry.history_policies, policy_id), E_POLICY_NOT_FOUND);
-    let policy = table::borrow(&registry.history_policies, policy_id);
-    assert!(!policy.is_revoked, E_POLICY_REVOKED);
-
-    let role = get_requester_role(registry, solver_registry_ref, requester);
-
-    let is_authorized = if (role == ROLE_USER && requester == policy.user_address) {
-        true
-    } else if (role == ROLE_ROUTER && policy.router_access_level > 0) {
-        true
-    } else {
-        false
-    };
-
-    assert!(is_authorized, E_UNAUTHORIZED);
-}
-
-// ===== ENTRY FUNCTIONS =====
-
-/// Create intent policy for a batch window.
-public fun create_intent_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    batch_id: u64,
-    solver_access_start_ms: u64,
-    solver_access_end_ms: u64,
-    router_access_enabled: bool,
-    auto_revoke_time: u64,
-    requires_solver_registration: bool,
-    min_solver_stake: u64,
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-    clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    let sender = tx_context::sender(ctx);
-    assert!(!table::contains(&registry.intent_policies, policy_id), E_POLICY_EXISTS);
-    assert!(solver_access_start_ms < solver_access_end_ms, E_INVALID_TIME_WINDOW);
-
-    let now = clock::timestamp_ms(clock);
-    let policy = IntentPolicy {
-        policy_id,
-        batch_id,
-        user_address: sender,
-        solver_access_window: TimeWindow {
-            start_ms: solver_access_start_ms,
-            end_ms: solver_access_end_ms,
-        },
-        router_access_enabled,
-        auto_revoke_time,
-        is_revoked: auto_revoke_time > 0 && now > auto_revoke_time,
-        access_condition: AccessCondition {
-            requires_solver_registration,
-            min_solver_stake,
-            requires_tee_attestation,
-            expected_measurement,
-            purpose,
-        },
-    };
-
-    table::add(&mut registry.intent_policies, policy_id, policy);
-
-    event::emit(PolicyCreated {
-        policy_id,
-        policy_type: POLICY_TYPE_INTENT,
-        owner: sender,
+    event::emit(SolutionAccessGranted {
+        solution_id: object::id(solution),
+        intent_id: registry::get_solution_intent_id(solution),
+        requester_addr,
+        granted_at_ms: clock::timestamp_ms(clock),
     });
 }
-
-/// Create solver strategy policy protecting solver strategies.
-public fun create_solver_strategy_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    router_can_access: bool,
-    admin_unlock_time: u64,
-    is_public: bool,
-    // TEE related fields are part of AccessCondition
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    let sender = tx_context::sender(ctx);
-    assert!(!table::contains(&registry.strategy_policies, policy_id), E_POLICY_EXISTS);
-
-    let policy = SolverStrategyPolicy {
-        policy_id,
-        solver_address: sender,
-        router_can_access: router_can_access && !is_public,
-        admin_unlock_time,
-        is_public,
-        is_revoked: false,
-        access_condition: AccessCondition {
-            requires_solver_registration: false,
-            min_solver_stake: 0,
-            requires_tee_attestation,
-            expected_measurement,
-            purpose,
-        },
-    };
-
-    table::add(&mut registry.strategy_policies, policy_id, policy);
-
-    event::emit(PolicyCreated {
-        policy_id,
-        policy_type: POLICY_TYPE_STRATEGY,
-        owner: sender,
-    });
-}
-
-/// Create user history policy controlling router data access.
-public fun create_user_history_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    router_access_level: u8,
-    user_can_revoke: bool,
-    // TEE related fields are part of AccessCondition
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-    clock: &Clock,
-    ctx: &mut TxContext,
-) {
-    let sender = tx_context::sender(ctx);
-    assert!(!table::contains(&registry.history_policies, policy_id), E_POLICY_EXISTS);
-
-    let policy = UserHistoryPolicy {
-        policy_id,
-        user_address: sender,
-        router_access_level,
-        user_can_revoke,
-        last_updated: clock::timestamp_ms(clock),
-        is_revoked: false,
-        access_condition: AccessCondition {
-            requires_solver_registration: false,
-            min_solver_stake: 0,
-            requires_tee_attestation,
-            expected_measurement,
-            purpose,
-        },
-    };
-
-    table::add(&mut registry.history_policies, policy_id, policy);
-
-    event::emit(PolicyCreated {
-        policy_id,
-        policy_type: POLICY_TYPE_USER_HISTORY,
-        owner: sender,
-    });
-}
-
-/// Revoke policy by owner or admin.
-public fun revoke_policy(
-    registry: &mut PolicyRegistry,
-    policy_type: u8,
-    policy_id: vector<u8>,
-    ctx: &mut TxContext,
-) {
-    let caller = tx_context::sender(ctx);
-    if (policy_type == POLICY_TYPE_INTENT) {
-        revoke_intent_policy(registry, &policy_id, caller);
-    } else if (policy_type == POLICY_TYPE_STRATEGY) {
-        revoke_strategy_policy(registry, &policy_id, caller);
-    } else {
-        revoke_history_policy(registry, &policy_id, caller);
-    };
-}
-
-/// Auto revoke expired policies supplied by backend batch.
-public fun auto_revoke_expired(
-    registry: &mut PolicyRegistry,
-    policy_type: u8,
-    policy_ids: vector<vector<u8>>,
-    clock: &Clock,
-) {
-    let now = clock::timestamp_ms(clock);
-    let len = vector::length(&policy_ids);
-    let mut i = 0;
-    while (i < len) {
-        let policy_id_ref = vector::borrow(&policy_ids, i);
-        if (policy_type == POLICY_TYPE_INTENT) {
-            auto_revoke_intent(registry, policy_id_ref, now);
-        } else if (policy_type == POLICY_TYPE_STRATEGY) {
-            auto_revoke_strategy(registry, policy_id_ref, now);
-        } else {
-            auto_revoke_history(registry, policy_id_ref, now);
-        };
-        i = i + 1;
-    };
-}
-
-// ===== VIEW FUNCTIONS =====
 
 // ===== INTERNAL HELPERS =====
 
-/// Determines the role of a given address.
+/// Check if caller address matches enclave public key
+/// Following Nautilus pattern: derive address from pk
+fun is_enclave_caller(caller_addr: address, config: &EnclaveConfig): bool {
+    if (vector::is_empty(&config.enclave_pk)) {
+        return false
+    };
+
+    // Derive address from enclave public key (ed25519)
+    // Same as Nautilus: blake2b_hash(flag || pk)
+    let enclave_addr = pk_to_address(&config.enclave_pk);
+    caller_addr.to_bytes() == enclave_addr
+}
+
+/// Convert public key to address (same as Nautilus pattern)
+fun pk_to_address(pk: &vector<u8>): vector<u8> {
+    use sui::hash::blake2b256;
+    // Assume ed25519 flag (0x00) for enclave's ephemeral key
+    let mut arr = vector[0u8];
+    arr.append(*pk);
+    blake2b256(&arr)
+}
+
+/// Determines the role of a given address
 fun get_requester_role(
-    registry: &PolicyRegistry,
     solver_registry_ref: &solver_registry::SolverRegistry,
-    requester: address,
+    requester_addr: address,
 ): u8 {
-    if (requester == registry.admin) {
-        ROLE_ADMIN
-    } else if (
-        option::is_some(&solver_registry::get_solver_profile(solver_registry_ref, requester))
-    ) {
-        // We assume a "router" is also a registered solver with a specific designation,
-        // but for this access control module, we'll treat any solver as ROLE_SOLVER.
-        // The distinction between a regular solver and a router can be handled by TEE attestation checks.
+    if (option::is_some(&solver_registry::get_solver_profile(solver_registry_ref, requester_addr))) {
+        // Registered solver (router is also a solver)
         ROLE_SOLVER
     } else {
-        // Default to user if not an admin or a known solver.
-        // Specific user permissions are checked against the policy owner field.
+        // Default to user
         ROLE_USER
     }
 }
 
-fun revoke_intent_policy(registry: &mut PolicyRegistry, policy_id: &vector<u8>, caller: address) {
-    assert!(table::contains(&registry.intent_policies, *policy_id), E_POLICY_NOT_FOUND);
-    let policy = table::borrow_mut(&mut registry.intent_policies, *policy_id);
-    assert!(!policy.is_revoked, E_POLICY_REVOKED);
-    assert!(caller == policy.user_address || caller == registry.admin, E_UNAUTHORIZED);
-    policy.is_revoked = true;
+/// Check if solver has access based on time window and conditions
+fun check_solver_access(
+    solver_addr: address,
+    solver_registry_ref: &solver_registry::SolverRegistry,
+    solver_access_window: &TimeWindow,
+    access_condition: &AccessCondition,
+    clock: &Clock,
+): bool {
+    let now = clock::timestamp_ms(clock);
 
-    event::emit(PolicyRevoked {
-        policy_id: policy.policy_id,
-        policy_type: POLICY_TYPE_INTENT,
-        revoked_by: caller,
-    });
-}
-
-fun revoke_strategy_policy(registry: &mut PolicyRegistry, policy_id: &vector<u8>, caller: address) {
-    assert!(table::contains(&registry.strategy_policies, *policy_id), E_POLICY_NOT_FOUND);
-    let policy = table::borrow_mut(&mut registry.strategy_policies, *policy_id);
-    assert!(!policy.is_revoked, E_POLICY_REVOKED);
-    assert!(caller == policy.solver_address || caller == registry.admin, E_UNAUTHORIZED);
-    policy.is_revoked = true;
-
-    event::emit(PolicyRevoked {
-        policy_id: policy.policy_id,
-        policy_type: POLICY_TYPE_STRATEGY,
-        revoked_by: caller,
-    });
-}
-
-fun revoke_history_policy(registry: &mut PolicyRegistry, policy_id: &vector<u8>, caller: address) {
-    assert!(table::contains(&registry.history_policies, *policy_id), E_POLICY_NOT_FOUND);
-    let policy = table::borrow_mut(&mut registry.history_policies, *policy_id);
-    assert!(!policy.is_revoked, E_POLICY_REVOKED);
-    assert!(
-        caller == policy.user_address || caller == registry.admin || policy.user_can_revoke,
-        E_UNAUTHORIZED,
-    );
-    policy.is_revoked = true;
-
-    event::emit(PolicyRevoked {
-        policy_id: policy.policy_id,
-        policy_type: POLICY_TYPE_USER_HISTORY,
-        revoked_by: caller,
-    });
-}
-
-fun auto_revoke_intent(registry: &mut PolicyRegistry, policy_id: &vector<u8>, now: u64) {
-    if (!table::contains(&registry.intent_policies, *policy_id)) {
-        return
+    // Check time window
+    let start_ms = registry::get_time_window_start(solver_access_window);
+    let end_ms = registry::get_time_window_end(solver_access_window);
+    if (now < start_ms || now > end_ms) {
+        return false
     };
-    let policy = table::borrow_mut(&mut registry.intent_policies, *policy_id);
-    if (!policy.is_revoked && policy.auto_revoke_time > 0 && now > policy.auto_revoke_time) {
-        policy.is_revoked = true;
-        event::emit(PolicyAutoRevoked {
-            policy_id: policy.policy_id,
-            policy_type: POLICY_TYPE_INTENT,
-            timestamp: now,
-        });
-    }
-}
 
-fun auto_revoke_strategy(registry: &mut PolicyRegistry, policy_id: &vector<u8>, now: u64) {
-    if (!table::contains(&registry.strategy_policies, *policy_id)) {
-        return
-    };
-    let policy = table::borrow_mut(&mut registry.strategy_policies, *policy_id);
-    if (
-        !policy.is_revoked && policy.is_public && policy.admin_unlock_time > 0 && now > policy.admin_unlock_time
-    ) {
-        policy.is_revoked = true;
-        event::emit(PolicyAutoRevoked {
-            policy_id: policy.policy_id,
-            policy_type: POLICY_TYPE_STRATEGY,
-            timestamp: now,
-        });
-    }
-}
+    // Check solver registration if required
+    let requires_registration = registry::get_access_condition_requires_solver_registration(access_condition);
+    if (requires_registration) {
+        if (!solver_registry::is_solver_active(solver_registry_ref, solver_addr)) {
+            return false
+        };
 
-fun auto_revoke_history(registry: &mut PolicyRegistry, policy_id: &vector<u8>, now: u64) {
-    if (!table::contains(&registry.history_policies, *policy_id)) {
-        return
+        // Check stake requirement
+        let min_stake = registry::get_access_condition_min_solver_stake(access_condition);
+        let solver_stake = solver_registry::get_solver_stake(solver_registry_ref, solver_addr);
+        if (solver_stake < min_stake) {
+            return false
+        };
     };
-    let policy = table::borrow_mut(&mut registry.history_policies, *policy_id);
-    if (
-        !policy.is_revoked && policy.access_condition.requires_tee_attestation && policy.last_updated < now
-    ) {
-        policy.is_revoked = true;
-        event::emit(PolicyAutoRevoked {
-            policy_id: policy.policy_id,
-            policy_type: POLICY_TYPE_USER_HISTORY,
-            timestamp: now,
-        });
-    }
+
+    true
 }
 
 // ===== TEST HELPERS =====
@@ -547,135 +266,56 @@ const ADMIN: address = @0xA;
 const USER: address = @0xB;
 #[test_only]
 const SOLVER: address = @0xC;
+#[test_only]
+const ENCLAVE: address = @0xE;
 
 #[test_only]
 public fun init_for_testing(ctx: &mut TxContext) {
     init(ctx);
 }
 
-/// Test core value: Seal policies and Solver Registry integration
-/// This tests the integration between Seal policies and Solver Registry
+/// Test seal approve with enclave public key
 #[test]
-fun test_seal_approve_intent_success() {
+fun test_seal_approve_intent_with_enclave() {
     let mut scenario = ts::begin(ADMIN);
 
-    // Initialize both registries
+    // Initialize modules
     solver_registry::init_for_testing(ts::ctx(&mut scenario));
+    registry::init_for_testing(ts::ctx(&mut scenario));
     init(ts::ctx(&mut scenario));
 
-    // Create and share Clock for testing
+    // Create and share Clock
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));
     clock.share_for_testing();
     ts::next_tx(&mut scenario, ADMIN);
 
-    // Register solver first
-    ts::next_tx(&mut scenario, SOLVER);
+    // Set enclave public key
+    ts::next_tx(&mut scenario, ADMIN);
     {
-        let mut solver_reg = ts::take_shared<solver_registry::SolverRegistry>(&scenario);
+        let mut config = ts::take_shared<EnclaveConfig>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
-        let stake_coin = coin::mint_for_testing<SUI>(
-            solver_registry::get_min_stake_amount(),
-            ts::ctx(&mut scenario),
-        );
-        solver_registry::register_solver(
-            &mut solver_reg,
-            stake_coin,
-            &clock_ref,
-            ts::ctx(&mut scenario),
-        );
-        ts::return_shared(solver_reg);
+
+        // Use a test enclave public key
+        let enclave_pk = x"5c38d3668c45ff891766ee99bd3522ae48d9771dc77e8a6ac9f0bde6c3a2ca48";
+        update_enclave_pk(&mut config, enclave_pk, &clock_ref, ts::ctx(&mut scenario));
+
+        ts::return_shared(config);
         ts::return_shared(clock_ref);
     };
 
-    // User creates intent policy
+    // User submits intent
     ts::next_tx(&mut scenario, USER);
     {
-        let mut policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
 
-        create_intent_policy(
-            &mut policy_reg,
-            b"policy_001",
-            1, // batch_id
-            now, // solver_access_start
-            now + 10_000, // solver_access_end (10s window)
-            true, // router_access_enabled
-            now + 86_400_000, // auto_revoke (24h)
-            true, // requires_solver_registration
-            solver_registry::get_min_stake_amount(), // min_stake
-            false, // requires_tee_attestation
-            vector::empty<u8>(), // expected_measurement
-            b"ranking", // purpose
-            &clock_ref,
-            ts::ctx(&mut scenario),
-        );
-
-        ts::return_shared(policy_reg);
-        ts::return_shared(clock_ref);
-    };
-
-    // Test access: Registered solver should have access
-    ts::next_tx(&mut scenario, SOLVER);
-    {
-        let policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
-        let solver_reg = ts::take_shared<solver_registry::SolverRegistry>(&scenario);
-        let clock_ref = ts::take_shared<Clock>(&scenario);
-
-        // This should complete successfully
-        seal_approve_intent(
-            b"policy_001",
-            &policy_reg,
-            &solver_reg,
-            &clock_ref,
-            ts::ctx(&mut scenario),
-        );
-
-        ts::return_shared(policy_reg);
-        ts::return_shared(solver_reg);
-        ts::return_shared(clock_ref);
-    };
-
-    // Clean up Clock
-    ts::next_tx(&mut scenario, ADMIN);
-    {
-        let clock = ts::take_shared<Clock>(&scenario);
-        clock.destroy_for_testing();
-    };
-
-    ts::end(scenario);
-}
-
-#[test]
-#[expected_failure(abort_code = E_UNAUTHORIZED)]
-fun test_seal_approve_intent_fail_unregistered() {
-    let mut scenario = ts::begin(ADMIN);
-
-    // Initialize both registries
-    solver_registry::init_for_testing(ts::ctx(&mut scenario));
-    init(ts::ctx(&mut scenario));
-
-    // Create and share Clock for testing
-    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
-    clock.share_for_testing();
-    ts::next_tx(&mut scenario, ADMIN);
-
-    // User creates intent policy that requires solver registration
-    ts::next_tx(&mut scenario, USER);
-    {
-        let mut policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
-        let clock_ref = ts::take_shared<Clock>(&scenario);
-        let now = clock::timestamp_ms(&clock_ref);
-
-        create_intent_policy(
-            &mut policy_reg,
-            b"policy_001",
-            1,
+        registry::submit_intent(
+            b"intent_blob_001",
             now,
             now + 10_000,
             true,
             now + 86_400_000,
-            true, // requires_solver_registration
+            true,
             solver_registry::get_min_stake_amount(),
             false,
             vector::empty<u8>(),
@@ -684,32 +324,33 @@ fun test_seal_approve_intent_fail_unregistered() {
             ts::ctx(&mut scenario),
         );
 
-        ts::return_shared(policy_reg);
         ts::return_shared(clock_ref);
     };
 
-    // Test access failure: An unregistered address (USER) attempts access
-    ts::next_tx(&mut scenario, USER);
+    // Enclave should have blanket access
+    ts::next_tx(&mut scenario, ENCLAVE);
     {
-        let policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
+        let intent = ts::take_from_sender<Intent>(&scenario);
+        let config = ts::take_shared<EnclaveConfig>(&scenario);
         let solver_reg = ts::take_shared<solver_registry::SolverRegistry>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
 
+        // This should succeed because enclave has blanket access
         seal_approve_intent(
-            b"policy_001",
-            &policy_reg,
+            &intent,
+            &config,
             &solver_reg,
             &clock_ref,
             ts::ctx(&mut scenario),
         );
 
-        // Return shared objects to avoid memory leaks in test harness
-        ts::return_shared(policy_reg);
+        transfer::transfer(intent, USER);
+        ts::return_shared(config);
         ts::return_shared(solver_reg);
         ts::return_shared(clock_ref);
     };
 
-    // Clean up Clock
+    // Clean up
     ts::next_tx(&mut scenario, ADMIN);
     {
         let clock = ts::take_shared<Clock>(&scenario);
@@ -719,94 +360,94 @@ fun test_seal_approve_intent_fail_unregistered() {
     ts::end(scenario);
 }
 
-/// Test core value: Auto-revocation of expired policies
+/// Test seal approve for solution owner
 #[test]
-#[expected_failure(abort_code = E_POLICY_REVOKED)]
-fun test_auto_revoke_expired_policies() {
+fun test_seal_approve_solution_by_owner() {
     let mut scenario = ts::begin(ADMIN);
+
+    // Initialize modules
+    solver_registry::init_for_testing(ts::ctx(&mut scenario));
+    registry::init_for_testing(ts::ctx(&mut scenario));
     init(ts::ctx(&mut scenario));
 
-    // Create and share Clock for testing
+    // Create and share Clock
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));
     clock.share_for_testing();
     ts::next_tx(&mut scenario, ADMIN);
 
-    // Create a solver registry for the test
-    solver_registry::init_for_testing(ts::ctx(&mut scenario));
-    ts::next_tx(&mut scenario, ADMIN);
-
-    // Create policy with short expiry
-    ts::next_tx(&mut scenario, USER);
+    // Register solver
+    ts::next_tx(&mut scenario, SOLVER);
     {
-        let mut policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
+        let mut solver_reg = ts::take_shared<solver_registry::SolverRegistry>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
-        let now = clock::timestamp_ms(&clock_ref);
-
-        create_intent_policy(
-            &mut policy_reg,
-            b"expiring_policy",
-            1,
-            now,
-            now + 5_000,
-            false,
-            now + 1_000, // Expires in 1 second
-            false,
-            0,
-            false,
-            vector::empty<u8>(),
-            b"test",
-            &clock_ref,
+        let stake_coin = coin::mint_for_testing<SUI>(
+            solver_registry::get_min_stake_amount(),
             ts::ctx(&mut scenario),
         );
-
-        ts::return_shared(policy_reg);
-        ts::return_shared(clock_ref);
-    };
-
-    // Advance time past the expiry
-    ts::next_tx(&mut scenario, ADMIN);
-    {
-        let mut clock = ts::take_shared<Clock>(&scenario);
-        clock::increment_for_testing(&mut clock, 2000); // Advance time by 2s
-        ts::return_shared(clock);
-    };
-
-    // Auto-revoke expired policies
-    ts::next_tx(&mut scenario, ADMIN);
-    {
-        let mut policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
-        let clock_ref = ts::take_shared<Clock>(&scenario);
-        let mut policy_ids = vector::empty<vector<u8>>();
-        vector::push_back(&mut policy_ids, b"expiring_policy");
-
-        auto_revoke_expired(&mut policy_reg, POLICY_TYPE_INTENT, policy_ids, &clock_ref);
-
-        ts::return_shared(policy_reg);
-        ts::return_shared(clock_ref);
-    };
-
-    // Now, trying to approve access should fail because the policy is expired
-    ts::next_tx(&mut scenario, USER);
-    {
-        let policy_reg = ts::take_shared<PolicyRegistry>(&scenario);
-        let solver_reg = ts::take_shared<solver_registry::SolverRegistry>(&scenario);
-        let clock_ref = ts::take_shared<Clock>(&scenario);
-
-        seal_approve_intent(
-            b"expiring_policy",
-            &policy_reg,
-            &solver_reg,
-            &clock_ref,
-            ts::ctx(&mut scenario),
-        );
-
-        // This part won't be reached, but for completeness:
-        ts::return_shared(policy_reg);
+        solver_registry::register_solver(&mut solver_reg, stake_coin, &clock_ref, ts::ctx(&mut scenario));
         ts::return_shared(solver_reg);
         ts::return_shared(clock_ref);
     };
 
-    // Clean up Clock
+    // User submits intent
+    ts::next_tx(&mut scenario, USER);
+    {
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+
+        registry::submit_intent(
+            b"intent_blob_001",
+            now,
+            now + 10_000,
+            true,
+            now + 86_400_000,
+            true,
+            solver_registry::get_min_stake_amount(),
+            false,
+            vector::empty<u8>(),
+            b"ranking",
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        ts::return_shared(clock_ref);
+    };
+
+    // Solver submits solution
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let solver_reg = ts::take_shared<solver_registry::SolverRegistry>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        registry::submit_solution(
+            &mut intent,
+            &solver_reg,
+            b"solution_blob_001",
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        transfer::transfer(intent, USER);
+        ts::return_shared(solver_reg);
+        ts::return_shared(clock_ref);
+    };
+
+    // Solver should have access to their own solution
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let solution = ts::take_from_sender<Solution>(&scenario);
+        let config = ts::take_shared<EnclaveConfig>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        seal_approve_solution(&solution, &config, &clock_ref, ts::ctx(&mut scenario));
+
+        transfer::transfer(solution, SOLVER);
+        ts::return_shared(config);
+        ts::return_shared(clock_ref);
+    };
+
+    // Clean up
     ts::next_tx(&mut scenario, ADMIN);
     {
         let clock = ts::take_shared<Clock>(&scenario);
