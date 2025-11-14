@@ -34,7 +34,7 @@ const STATUS_UNSTAKING: u8 = 3;
 
 /// Admin capability for managing the solver registry
 public struct AdminCap has key, store {
-    id: object::UID,
+    id: UID,
 }
 
 /// Individual solver profile with performance metrics
@@ -54,7 +54,7 @@ public struct SolverProfile has copy, drop, store {
 
 /// Main solver registry (shared object)
 public struct SolverRegistry has key {
-    id: object::UID,
+    id: UID,
     profiles: Table<address, SolverProfile>,
     stakes: Table<address, Balance<SUI>>, // Separate table for balances
     min_stake: u64,

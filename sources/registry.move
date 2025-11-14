@@ -50,7 +50,6 @@ public struct AccessCondition has copy, drop, store {
 /// Policy parameters embedded in Intent (ON-CHAIN ENFORCEMENT)
 public struct PolicyParams has copy, drop, store {
     solver_access_window: TimeWindow,
-    router_access_enabled: bool,
     auto_revoke_time: u64,
     access_condition: AccessCondition,
 }
@@ -88,7 +87,6 @@ public struct Intent has key, store {
 /// On-chain only tracks blob_id, TEE attestation, and validation status
 public struct Solution has key, store {
     id: UID,
-    intent_id: ID,
     solver_address: address,
     created_ts: u64,
 
@@ -140,7 +138,6 @@ public struct SolutionSubmitted has copy, drop {
 
 public struct SolutionTEEValidated has copy, drop {
     solution_id: ID,
-    intent_id: ID,
     solver_address: address,
     validated_at: u64,
     measurement: vector<u8>,
@@ -169,7 +166,6 @@ public entry fun submit_intent(
     blob_id: vector<u8>,
     solver_access_start_ms: u64,
     solver_access_end_ms: u64,
-    router_access_enabled: bool,
     auto_revoke_time: u64,
     requires_solver_registration: bool,
     min_solver_stake: u64,
@@ -200,7 +196,6 @@ public entry fun submit_intent(
                 start_ms: solver_access_start_ms,
                 end_ms: solver_access_end_ms,
             },
-            router_access_enabled,
             auto_revoke_time,
             access_condition: AccessCondition {
                 requires_solver_registration,
@@ -256,11 +251,9 @@ public entry fun submit_solution(
     // Create solution with reference to Walrus blob
     let solution_uid = object::new(ctx);
     let solution_id = object::uid_to_inner(&solution_uid);
-    let intent_id = object::uid_to_inner(&intent.id);
 
     let solution = Solution {
         id: solution_uid,
-        intent_id,
         solver_address: solver,
         created_ts: timestamp,
         blob_id,
@@ -276,7 +269,6 @@ public entry fun submit_solution(
     // Emit event
     event::emit(SolutionSubmitted {
         solution_id,
-        intent_id,
         solver_address: solver,
         blob_id: solution.blob_id,
         created_ts: timestamp,
@@ -304,9 +296,6 @@ public entry fun validate_solution_with_tee(
 
     // Verify status transition
     assert!(solution.status == SOLUTION_STATUS_PENDING, E_INVALID_STATUS_TRANSITION);
-
-    // SECURITY: Verify solution belongs to this intent
-    assert!(solution.intent_id == object::uid_to_inner(&intent.id), E_UNAUTHORIZED);
 
     // SECURITY: Verify measurement matches expected measurement in Intent policy
     let expected_measurement = &intent.policy.access_condition.expected_measurement;
@@ -349,7 +338,6 @@ public entry fun validate_solution_with_tee(
     // Emit event
     event::emit(SolutionTEEValidated {
         solution_id: object::uid_to_inner(&solution.id),
-        intent_id: solution.intent_id,
         solver_address: solution.solver_address,
         validated_at: timestamp,
         measurement,
@@ -426,6 +414,7 @@ public entry fun execute_solution(
 /// Called when TEE validation fails or solution violates constraints
 public entry fun reject_solution(
     solution: &mut Solution,
+    intent: &Intent,
     solver_registry: &mut SolverRegistry,
     reason: vector<u8>,
     clock: &Clock,
@@ -442,7 +431,7 @@ public entry fun reject_solution(
     // Emit event
     event::emit(SolutionRejected {
         solution_id: object::uid_to_inner(&solution.id),
-        intent_id: solution.intent_id,
+        intent_id: object::uid_to_inner(&intent.id),
         reason,
         rejected_at: timestamp,
     });
@@ -576,11 +565,6 @@ public fun get_solution_id(solution: &Solution): ID {
     object::uid_to_inner(&solution.id)
 }
 
-/// Get solution intent ID
-public fun get_solution_intent_id(solution: &Solution): ID {
-    solution.intent_id
-}
-
 /// Get solution solver address
 public fun get_solution_solver(solution: &Solution): address {
     solution.solver_address
@@ -655,7 +639,7 @@ fun test_intent_solution_lifecycle_with_tee() {
             &clock_ref,
         );
 
-        transfer::transfer(admin_cap, ADMIN);
+        transfer::public_transfer(admin_cap, ADMIN);
         ts::return_shared(tee_ver);
         ts::return_shared(clock_ref);
     };
@@ -683,7 +667,7 @@ fun test_intent_solution_lifecycle_with_tee() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"walrus_blob_id_intent_001",
+            b"walrus_blob_id_intent_001",   
             now,
             now + 10_000,
             true,

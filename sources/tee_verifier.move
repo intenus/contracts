@@ -18,12 +18,12 @@ const MAX_TIMESTAMP_DRIFT_MS: u64 = 300_000; // 5 minutes
 
 /// Capability for managing trusted measurements.
 public struct AdminCap has key, store {
-    id: object::UID,
+    id: UID,
 }
 
 /// Verifier shared object storing trusted configuration.
 public struct TeeVerifier has key {
-    id: object::UID,
+    id: UID,
     service_name: vector<u8>,
     measurement: vector<u8>,
     version: vector<u8>,
