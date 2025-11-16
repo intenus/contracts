@@ -165,6 +165,7 @@ public struct SolutionRejected has copy, drop {
 /// Submit a new intent with embedded policy parameters
 /// Creates an Intent object with reference to IGS intent in Walrus
 /// The actual IGS intent content (operation, constraints, etc.) is stored OFF-CHAIN
+#[allow(lint(public_entry))]
 public entry fun submit_intent(
     blob_id: vector<u8>,
     solver_access_start_ms: u64,
@@ -230,6 +231,7 @@ public entry fun submit_intent(
 /// Submit a solution for an intent with policy validation
 /// Creates a Solution object with reference to IGS solution in Walrus
 /// The actual IGS solution content (PTB, surplus calculation) is stored OFF-CHAIN
+#[allow(lint(public_entry))]
 public entry fun submit_solution(
     intent: &mut Intent,
     solver_registry: &SolverRegistry,
@@ -281,6 +283,7 @@ public entry fun submit_solution(
 /// Attest solution with enclave signature
 /// Called by enclave after validating the IGS solution off-chain
 /// SECURITY CRITICAL: Verifies signature using enclave public key
+#[allow(lint(public_entry))]
 public entry fun attest_solution(
     solution: &mut Solution,
     intent: &Intent,
@@ -333,6 +336,7 @@ public entry fun attest_solution(
 
 /// Select the best solution for an intent (only owner can select)
 /// User selects from attested solutions ranked by AI
+#[allow(lint(public_entry))]
 public entry fun select_best_solution(
     intent: &mut Intent,
     solution_id: ID,
@@ -363,6 +367,7 @@ public entry fun select_best_solution(
 }
 
 /// Execute the selected solution (only owner can execute)
+#[allow(lint(public_entry))]
 public entry fun execute_solution(
     intent: &mut Intent,
     solution: &mut Solution,
@@ -399,6 +404,7 @@ public entry fun execute_solution(
 
 /// Reject a solution with reason (for slashing mechanism)
 /// Called when attestation fails or solution violates constraints
+#[allow(lint(public_entry))]
 public entry fun reject_solution(
     solution: &mut Solution,
     solver_registry: &mut SolverRegistry,
@@ -424,6 +430,7 @@ public entry fun reject_solution(
 }
 
 /// Revoke an intent (only owner can revoke)
+#[allow(lint(public_entry))]
 public entry fun revoke_intent(
     intent: &mut Intent,
     clock: &Clock,
@@ -609,7 +616,7 @@ public fun get_access_condition_min_solver_stake(condition: &AccessCondition): u
 // ===== TEST HELPERS =====
 
 #[test_only]
-public fun init_for_testing(ctx: &mut TxContext) {
+public fun init_for_testing(_ctx: &mut TxContext) {
     // Registry module doesn't have shared state, so nothing to initialize
 }
 
