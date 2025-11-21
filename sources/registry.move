@@ -3,6 +3,7 @@ module intenus::registry;
 use sui::clock::{Self, Clock};
 use sui::event;
 use intenus::solver_registry::{Self, SolverRegistry};
+use std::string::{Self, String};
 
 // ===== ERRORS =====
 const E_INVALID_BLOB_ID: u64 = 6001;
@@ -76,7 +77,7 @@ public struct Intent has key, store {
     created_ms: u64,
 
     // Reference to IGS intent in Walrus (OFF-CHAIN STORAGE)
-    blob_id: vector<u8>,
+    blob_id: String,
 
     // On-chain policy enforcement
     policy: PolicyParams,
@@ -97,7 +98,7 @@ public struct Solution has key, store {
     created_ms: u64,
 
     // Reference to IGS solution in Walrus (OFF-CHAIN STORAGE)
-    blob_id: vector<u8>,
+    blob_id: String,
 
     // Enclave attestation (Optional, verified by enclave)
     attestation: Option<Attestation>,
@@ -111,7 +112,7 @@ public struct Solution has key, store {
 public struct IntentSubmitted has copy, drop {
     intent_id: ID,
     user_addr: address,
-    blob_id: vector<u8>,
+    blob_id: String,
     created_ms: u64,
     solver_access_start_ms: u64,
     solver_access_end_ms: u64,
@@ -134,7 +135,7 @@ public struct SolutionSubmitted has copy, drop {
     solution_id: ID,
     intent_id: ID,
     solver_addr: address,
-    blob_id: vector<u8>,
+    blob_id: String,
     created_ms: u64,
 }
 
@@ -167,7 +168,7 @@ public struct SolutionRejected has copy, drop {
 /// The actual IGS intent content (operation, constraints, etc.) is stored OFF-CHAIN
 #[allow(lint(public_entry))]
 public entry fun submit_intent(
-    blob_id: vector<u8>,
+    blob_id: String,
     solver_access_start_ms: u64,
     solver_access_end_ms: u64,
     auto_revoke_ms: u64,
@@ -183,7 +184,7 @@ public entry fun submit_intent(
     let timestamp_ms = clock::timestamp_ms(clock);
 
     // Validate input
-    assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
+    assert!(blob_id.length() > 0, E_INVALID_BLOB_ID);
     assert!(solver_access_start_ms < solver_access_end_ms, E_INVALID_TIME_WINDOW);
 
     // Create intent with reference to Walrus blob
@@ -235,7 +236,7 @@ public entry fun submit_intent(
 public entry fun submit_solution(
     intent: &mut Intent,
     solver_registry: &SolverRegistry,
-    blob_id: vector<u8>,
+    blob_id: String,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -243,7 +244,7 @@ public entry fun submit_solution(
     let timestamp_ms = clock::timestamp_ms(clock);
 
     // Validate inputs
-    assert!(vector::length(&blob_id) > 0, E_INVALID_BLOB_ID);
+    assert!(blob_id.length() > 0, E_INVALID_BLOB_ID);
     assert!(intent.status == INTENT_STATUS_PENDING, E_INTENT_REVOKED);
 
     // Validate policy conditions (ON-CHAIN ENFORCEMENT)
@@ -522,7 +523,7 @@ public fun get_intent_status(intent: &Intent): u8 {
 }
 
 /// Get intent blob_id (reference to IGS intent in Walrus)
-public fun get_intent_blob_id(intent: &Intent): vector<u8> {
+public fun get_intent_blob_id(intent: &Intent): String {
     intent.blob_id
 }
 
@@ -552,7 +553,7 @@ public fun get_solution_solver(solution: &Solution): address {
 }
 
 /// Get solution blob_id (reference to IGS solution in Walrus)
-public fun get_solution_blob_id(solution: &Solution): vector<u8> {
+public fun get_solution_blob_id(solution: &Solution): String {
     solution.blob_id
 }
 
@@ -670,15 +671,15 @@ fun test_intent_solution_lifecycle_with_attestation() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"walrus_blob_id_intent_001",
+            "walrus_blob_id_intent_001",
             now,
             now + 10_000,
             now + 86_400_000,
             true,
             solver_registry::get_min_stake_amount(),
             true, // requires attestation
-            b"expected_measurement",
-            b"swap",
+            "expected_measurement",
+            "swap",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -696,7 +697,7 @@ fun test_intent_solution_lifecycle_with_attestation() {
         submit_solution(
             &mut intent,
             &solver_reg,
-            b"walrus_blob_id_solution_001",
+            "walrus_blob_id_solution_001",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -800,7 +801,7 @@ fun test_unregistered_solver_fails() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"walrus_blob_id",
+            "walrus_blob_id",
             now,
             now + 10_000,
             now + 86_400_000,
@@ -826,7 +827,7 @@ fun test_unregistered_solver_fails() {
         submit_solution(
             &mut intent,
             &solver_reg,
-            b"walrus_blob_solution",
+            "walrus_blob_solution",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -860,7 +861,7 @@ fun test_intent_revocation() {
         let now = clock::timestamp_ms(&clock_ref);
 
         submit_intent(
-            b"walrus_blob_id",
+            "walrus_blob_id",
             now,
             now + 10_000,
             now + 86_400_000,

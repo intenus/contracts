@@ -307,7 +307,7 @@ fun test_seal_approve_intent_with_enclave() {
         let now = clock::timestamp_ms(&clock_ref);
 
         registry::submit_intent(
-            b"intent_blob_001",
+            "intent_blob_001",
             now,
             now + 10_000,
             now + 86_400_000,
@@ -392,7 +392,7 @@ fun test_seal_approve_solution_by_owner() {
         let now = clock::timestamp_ms(&clock_ref);
 
         registry::submit_intent(
-            b"intent_blob_001",
+            "intent_blob_001",
             now,
             now + 10_000,
             now + 86_400_000,
@@ -418,7 +418,7 @@ fun test_seal_approve_solution_by_owner() {
         registry::submit_solution(
             &mut intent,
             &solver_reg,
-            b"solution_blob_001",
+            "solution_blob_001",
             &clock_ref,
             ts::ctx(&mut scenario),
         );
