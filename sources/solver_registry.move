@@ -143,7 +143,7 @@ public fun get_admin_cap_for_testing(ctx: &mut tx_context::TxContext): AdminCap 
 // ===== ENTRY FUNCTIONS =====
 
 /// Register as a solver with initial stake
-public fun register_solver(
+public entry fun register_solver(
     registry: &mut SolverRegistry,
     stake: Coin<SUI>,
     clock: &Clock,
@@ -188,7 +188,7 @@ public fun register_solver(
 }
 
 /// Increase stake amount
-public fun increase_stake(
+public entry fun increase_stake(
     registry: &mut SolverRegistry,
     additional_stake: Coin<SUI>,
     ctx: &mut tx_context::TxContext,
@@ -209,7 +209,7 @@ public fun increase_stake(
 }
 
 /// Initiate withdrawal process (starts cooldown)
-public fun initiate_withdrawal(
+public entry fun initiate_withdrawal(
     registry: &mut SolverRegistry,
     amount: u64,
     clock: &Clock,
@@ -521,12 +521,12 @@ fun log_approximation(value: u64): u64 {
 // ===== ADMIN FUNCTIONS =====
 
 /// Update minimum stake requirement (admin only)
-public fun update_min_stake(_: &AdminCap, registry: &mut SolverRegistry, new_min_stake: u64) {
+public entry fun update_min_stake(_: &AdminCap, registry: &mut SolverRegistry, new_min_stake: u64) {
     registry.min_stake = new_min_stake;
 }
 
 /// Update slash percentage (admin only)
-public fun update_slash_percentage(
+public entry fun update_slash_percentage(
     _: &AdminCap,
     registry: &mut SolverRegistry,
     new_percentage: u8,

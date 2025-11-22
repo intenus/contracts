@@ -179,7 +179,7 @@ fun init(witness: SLASH_MANAGER, ctx: &mut TxContext) {
 
 /// Submit a slash with TEE evidence, create soulbound NFT and apply penalty
 /// Note: Caller should verify solver exists before calling this function
-public fun submit_slash(
+public entry fun submit_slash(
     manager: &mut SlashManager,
     verifier: &TeeVerifier,
     evidence: SlashEvidence,
@@ -249,7 +249,7 @@ public fun submit_slash(
     });
 }
 
-public fun file_appeal(
+public entry fun file_appeal(
     manager: &mut SlashManager,
     slash_record: &mut SlashRecord,
     appeal_reason: vector<u8>,
@@ -292,7 +292,7 @@ public fun file_appeal(
     });
 }
 
-public fun resolve_appeal(
+public entry fun resolve_appeal(
     _admin_cap: &AdminCap,
     manager: &mut SlashManager,
     slash_record: &mut SlashRecord,

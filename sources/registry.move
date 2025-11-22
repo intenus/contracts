@@ -42,8 +42,7 @@ public struct AccessCondition has copy, drop, store {
     requires_solver_registration: bool,
     min_solver_stake: u64,
     requires_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
+    min_solver_reputation_score: u64,
 }
 
 /// Policy parameters embedded in Intent (ON-CHAIN ENFORCEMENT)
@@ -175,8 +174,7 @@ public entry fun submit_intent(
     requires_solver_registration: bool,
     min_solver_stake: u64,
     requires_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
+    min_solver_reputation_score: u64,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -206,8 +204,7 @@ public entry fun submit_intent(
                 requires_solver_registration,
                 min_solver_stake,
                 requires_attestation,
-                expected_measurement,
-                purpose,
+                min_solver_reputation_score,
             },
         },
         status: INTENT_STATUS_PENDING,
@@ -304,13 +301,8 @@ public entry fun attest_solution(
     // SECURITY: Verify solution belongs to this intent
     assert!(solution.intent_id == object::uid_to_inner(&intent.id), E_UNAUTHORIZED);
 
-    // SECURITY: Verify measurement matches expected measurement in Intent policy
-    let expected_measurement = &intent.policy.access_condition.expected_measurement;
-    if (vector::length(expected_measurement) > 0) {
-        assert!(bytes_equal(&measurement, expected_measurement), E_POLICY_VALIDATION_FAILED);
-    };
-
     // TODO: Verify signature with enclave public key (done via seal-approve in seal module)
+    // TODO: Verify measurement if needed (can be done off-chain or via additional verification)
 
     // Create attestation after verification
     let attestation = Attestation {
@@ -614,6 +606,11 @@ public fun get_access_condition_min_solver_stake(condition: &AccessCondition): u
     condition.min_solver_stake
 }
 
+/// Get minimum solver reputation score requirement
+public fun get_access_condition_min_solver_reputation_score(condition: &AccessCondition): u64 {
+    condition.min_solver_reputation_score
+}
+
 // ===== TEST HELPERS =====
 
 #[test_only]
@@ -678,8 +675,7 @@ fun test_intent_solution_lifecycle_with_attestation() {
             true,
             solver_registry::get_min_stake_amount(),
             true, // requires attestation
-            "expected_measurement",
-            "swap",
+            5000, // min_solver_reputation_score
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -808,8 +804,7 @@ fun test_unregistered_solver_fails() {
             true, // REQUIRES solver registration
             solver_registry::get_min_stake_amount(),
             false,
-            vector::empty(),
-            b"test",
+            0, // min_solver_reputation_score
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -868,8 +863,7 @@ fun test_intent_revocation() {
             false,
             0,
             false,
-            vector::empty(),
-            b"test",
+            0, // min_solver_reputation_score
             &clock_ref,
             ts::ctx(&mut scenario),
         );

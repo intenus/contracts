@@ -84,7 +84,7 @@ fun init(ctx: &mut tx_context::TxContext) {
 // ===== ENTRY FUNCTIONS =====
 
 /// Initialize trusted measurement and attestation key (one-time).
-public fun initialize_trusted_measurement(
+public entry fun initialize_trusted_measurement(
     _: &AdminCap,
     verifier: &mut TeeVerifier,
     service_name: vector<u8>,
@@ -110,7 +110,7 @@ public fun initialize_trusted_measurement(
 }
 
 /// Rotate attestation public key and measurement hash.
-public fun rotate_attestation_key(
+public entry fun rotate_attestation_key(
     _: &AdminCap,
     verifier: &mut TeeVerifier,
     new_measurement: vector<u8>,
@@ -133,7 +133,7 @@ public fun rotate_attestation_key(
 
 /// Verify ranking proof metadata and store attestation record.
 /// Signature verification must be performed off-chain; caller supplies boolean flag.
-public fun submit_attestation_record(
+public entry fun submit_attestation_record(
     verifier: &mut TeeVerifier,
     batch_id: u64,
     input_hash: vector<u8>,

@@ -243,6 +243,15 @@ fun check_solver_access(
         if (solver_stake < min_stake) {
             return false
         };
+
+        // Check reputation requirement
+        let min_reputation = registry::get_access_condition_min_solver_reputation_score(access_condition);
+        if (min_reputation > 0) {
+            let solver_reputation = solver_registry::get_solver_reputation(solver_registry_ref, solver_addr);
+            if (solver_reputation < min_reputation) {
+                return false
+            };
+        };
     };
 
     true
@@ -314,8 +323,7 @@ fun test_seal_approve_intent_with_enclave() {
             true,
             solver_registry::get_min_stake_amount(),
             false,
-            vector::empty<u8>(),
-            b"ranking",
+            0, // min_solver_reputation_score
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -399,8 +407,7 @@ fun test_seal_approve_solution_by_owner() {
             true,
             solver_registry::get_min_stake_amount(),
             false,
-            vector::empty<u8>(),
-            b"ranking",
+            0, // min_solver_reputation_score
             &clock_ref,
             ts::ctx(&mut scenario),
         );
