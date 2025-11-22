@@ -22,6 +22,7 @@ const E_INSUFFICIENT_FEE: u64 = 6010;
 const E_NO_FEE_TO_REFUND: u64 = 6011;
 
 // ===== CONSTANTS =====
+// ===== CONSTANTS =====
 const INTENT_STATUS_PENDING: u8 = 0;
 const INTENT_STATUS_BEST_SOLUTION_SELECTED: u8 = 1;
 const INTENT_STATUS_EXECUTED: u8 = 2;
@@ -39,6 +40,7 @@ const MIN_INTENT_FEE: u64 = 1_000_000; // 0.001 SUI minimum fee
 
 // ===== STRUCTS =====
 
+/// Time window for solver access control
 /// Treasury to hold platform fees
 public struct Treasury has key {
     id: UID,
@@ -60,6 +62,7 @@ public struct AccessCondition has copy, drop, store {
     min_solver_reputation_score: u64,
 }
 
+/// Policy parameters embedded in Intent
 /// Policy parameters embedded in Intent
 public struct PolicyParams has copy, drop, store {
     solver_access_window: TimeWindow,
@@ -192,6 +195,7 @@ fun init(ctx: &mut TxContext) {
 
 /// Submit a new intent with embedded policy parameters
 /// Creates an Intent object with reference to IGS intent in Walrus
+/// The off-chain IGS intent content (operation, constraints, etc.) which helps solvers understand the intent and solve it.
 /// The off-chain IGS intent content (operation, constraints, etc.) which helps solvers understand the intent and solve it.
 #[allow(lint(public_entry))]
 public entry fun submit_intent(
@@ -334,6 +338,8 @@ public entry fun attest_solution(
     // SECURITY: Verify solution belongs to this intent
     assert!(solution.intent_id == object::uid_to_inner(&intent.id), E_UNAUTHORIZED);
 
+    // TODO: Verify signature with enclave public key
+    // TODO: Verify measurement if needed
     // TODO: Verify signature with enclave public key
     // TODO: Verify measurement if needed
 

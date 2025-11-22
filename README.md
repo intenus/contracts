@@ -14,6 +14,56 @@ Quick reference for developers on important functions in Intenus smart contracts
 
 ---
 
+## Deployment
+
+### Package Information
+
+| Property | Value |
+|----------|-------|
+| **Package ID** | `0x993c7635b44582e9c47c589c759239d3e1ce787811af5bfa0056aa253caa394a` |
+| **Transaction Digest** | `FCFvV7MeCMF2uNjVHCvbo4exNyhvTw1hXzEysaZ5kW2A` |
+| **Version** | 1 |
+| **Modules** | `registry`, `seal_policy_coordinator`, `slash_manager`, `solver_registry`, `tee_verifier` |
+
+### Shared Objects
+
+After publishing, the following shared objects are created:
+
+| Object | Address | Module |
+|--------|---------|--------|
+| **SolverRegistry** | `0xf71c16414b66054dfe9ebca5f22f8076a8294715d5a3e4ae4b2b4e0cd5d7e64a` | `solver_registry` |
+| **SlashManager** | `0x1d023609156241468439e933c094dba4982d35292b0dd21c66cf85cc8f53b283` | `slash_manager` |
+| **TeeVerifier** | `0xf0867b65374e34905b7737432e93d53722b08bc39cd621740b685a366272f857` | `tee_verifier` |
+| **EnclaveConfig** | `0xe525e478d2448b4e895d744b31f9fa7cab599f6ce5c36b6b24dab2f9c54ad0fd` | `seal_policy_coordinator` |
+| **Treasury** | `0x1aa5d3878fac1e2b10bf471bd1cbef6868ca1d04643c24c3d3b358d762f34f53` | `registry` |
+
+### Environment Variables
+
+All deployment addresses are available in `.env` file. To use them:
+
+```bash
+# Load environment variables
+source .env
+
+# Use in your scripts
+echo $INTENUS_PACKAGE_ID
+echo $INTENUS_SOLVER_REGISTRY_ID
+echo $INTENUS_TREASURY_ID
+```
+
+Available environment variables:
+- `INTENUS_PACKAGE_ID` - Package ID
+- `INTENUS_SOLVER_REGISTRY_ID` - SolverRegistry shared object
+- `INTENUS_SLASH_MANAGER_ID` - SlashManager shared object
+- `INTENUS_TEE_VERIFIER_ID` - TeeVerifier shared object
+- `INTENUS_SEAL_ENCLAVE_CONFIG_ID` - EnclaveConfig shared object
+- `INTENUS_TREASURY_ID` - Treasury shared object
+- `INTENUS_*_ADMIN_CAP` - Admin capabilities for each module
+- `INTENUS_PACKAGE_UPGRADE_CAP` - Package upgrade capability
+- `INTENUS_PACKAGE_PUBLISHER` - Package publisher object
+
+---
+
 ## Entry Functions (Main Functions)
 
 ### Module: `intenus::registry`
