@@ -314,6 +314,7 @@ fun test_seal_approve_intent_with_enclave() {
     {
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(1_000_000, ts::ctx(&mut scenario));
 
         registry::submit_intent(
             "intent_blob_001",
@@ -324,6 +325,7 @@ fun test_seal_approve_intent_with_enclave() {
             solver_registry::get_min_stake_amount(),
             false,
             0, // min_solver_reputation_score
+            fee_coin,
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -398,6 +400,7 @@ fun test_seal_approve_solution_by_owner() {
     {
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(1_000_000, ts::ctx(&mut scenario));
 
         registry::submit_intent(
             "intent_blob_001",
@@ -408,6 +411,7 @@ fun test_seal_approve_solution_by_owner() {
             solver_registry::get_min_stake_amount(),
             false,
             0, // min_solver_reputation_score
+            fee_coin,
             &clock_ref,
             ts::ctx(&mut scenario),
         );

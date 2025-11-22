@@ -4,6 +4,9 @@ use sui::clock::{Self, Clock};
 use sui::event;
 use intenus::solver_registry::{Self, SolverRegistry};
 use std::string::{Self, String};
+use sui::balance::{Self, Balance};
+use sui::coin::{Self, Coin};
+use sui::sui::SUI;
 
 // ===== ERRORS =====
 const E_INVALID_BLOB_ID: u64 = 6001;
@@ -15,6 +18,8 @@ const E_INVALID_TIME_WINDOW: u64 = 6006;
 const E_SOLUTION_ALREADY_SELECTED: u64 = 6007;
 const E_INVALID_STATUS_TRANSITION: u64 = 6008;
 const E_ATTESTATION_REQUIRED: u64 = 6009;
+const E_INSUFFICIENT_FEE: u64 = 6010;
+const E_NO_FEE_TO_REFUND: u64 = 6011;
 
 // ===== INTENT STATUS CONSTANTS =====
 const INTENT_STATUS_PENDING: u8 = 0;
@@ -29,7 +34,19 @@ const SOLUTION_STATUS_SELECTED: u8 = 2;
 const SOLUTION_STATUS_EXECUTED: u8 = 3;
 const SOLUTION_STATUS_REJECTED: u8 = 4;
 
+// ===== FEE CONSTANTS =====
+const PLATFORM_FEE_BPS: u64 = 1000; // 10% platform fee (in basis points)
+const MIN_INTENT_FEE: u64 = 1_000_000; // 0.001 SUI minimum fee
+
 // ===== STRUCTS =====
+
+/// Treasury to hold platform fees (shared object)
+public struct Treasury has key {
+    id: UID,
+    balance: Balance<SUI>,
+    total_fees_collected: u64,
+    admin: address,
+}
 
 /// Time window for solver access control (ON-CHAIN ENFORCEMENT)
 public struct TimeWindow has copy, drop, store {
@@ -81,6 +98,9 @@ public struct Intent has key, store {
     // On-chain policy enforcement
     policy: PolicyParams,
 
+    // Fee locked by user (distributed to winner or refunded)
+    intent_fee: Balance<SUI>,
+
     // Solution management
     status: u8,
     best_solution_id: Option<ID>,
@@ -115,12 +135,14 @@ public struct IntentSubmitted has copy, drop {
     created_ms: u64,
     solver_access_start_ms: u64,
     solver_access_end_ms: u64,
+    fee_amount: u64,
 }
 
 public struct IntentRevoked has copy, drop {
     intent_id: ID,
     user_addr: address,
     revoked_at_ms: u64,
+    refunded_fee: u64,
 }
 
 public struct IntentExecuted has copy, drop {
@@ -128,6 +150,8 @@ public struct IntentExecuted has copy, drop {
     solution_id: ID,
     user_addr: address,
     executed_at_ms: u64,
+    solver_reward: u64,
+    platform_fee: u64,
 }
 
 public struct SolutionSubmitted has copy, drop {
@@ -160,6 +184,19 @@ public struct SolutionRejected has copy, drop {
     rejected_at_ms: u64,
 }
 
+// ===== INITIALIZATION =====
+
+/// Initialize the registry with treasury
+fun init(ctx: &mut TxContext) {
+    let treasury = Treasury {
+        id: object::new(ctx),
+        balance: balance::zero<SUI>(),
+        total_fees_collected: 0,
+        admin: tx_context::sender(ctx),
+    };
+    transfer::share_object(treasury);
+}
+
 // ===== ENTRY FUNCTIONS =====
 
 /// Submit a new intent with embedded policy parameters
@@ -175,15 +212,18 @@ public entry fun submit_intent(
     min_solver_stake: u64,
     requires_attestation: bool,
     min_solver_reputation_score: u64,
+    fee: Coin<SUI>,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
     let sender = tx_context::sender(ctx);
     let timestamp_ms = clock::timestamp_ms(clock);
+    let fee_amount = coin::value(&fee);
 
     // Validate input
     assert!(blob_id.length() > 0, E_INVALID_BLOB_ID);
     assert!(solver_access_start_ms < solver_access_end_ms, E_INVALID_TIME_WINDOW);
+    assert!(fee_amount >= MIN_INTENT_FEE, E_INSUFFICIENT_FEE);
 
     // Create intent with reference to Walrus blob
     let intent_uid = object::new(ctx);
@@ -207,6 +247,7 @@ public entry fun submit_intent(
                 min_solver_reputation_score,
             },
         },
+        intent_fee: coin::into_balance(fee),
         status: INTENT_STATUS_PENDING,
         best_solution_id: option::none(),
         pending_solutions: vector::empty(),
@@ -220,6 +261,7 @@ public entry fun submit_intent(
         created_ms: timestamp_ms,
         solver_access_start_ms,
         solver_access_end_ms,
+        fee_amount,
     });
 
     // Transfer intent to user
@@ -364,6 +406,7 @@ public entry fun select_best_solution(
 public entry fun execute_solution(
     intent: &mut Intent,
     solution: &mut Solution,
+    treasury: &mut Treasury,
     clock: &Clock,
     ctx: &mut TxContext,
 ) {
@@ -382,6 +425,21 @@ public entry fun execute_solution(
     // Verify solution is attested
     assert!(solution.status == SOLUTION_STATUS_ATTESTED, E_ATTESTATION_REQUIRED);
 
+    // Distribute fee
+    let total_fee = balance::value(&intent.intent_fee);
+    let platform_fee_amount = (total_fee * PLATFORM_FEE_BPS) / 10000;
+    let solver_reward_amount = total_fee - platform_fee_amount;
+
+    // Transfer platform fee to treasury
+    let platform_fee_balance = balance::split(&mut intent.intent_fee, platform_fee_amount);
+    balance::join(&mut treasury.balance, platform_fee_balance);
+    treasury.total_fees_collected = treasury.total_fees_collected + platform_fee_amount;
+
+    // Transfer solver reward
+    let solver_reward_balance = balance::withdraw_all(&mut intent.intent_fee);
+    let solver_reward_coin = coin::from_balance(solver_reward_balance, ctx);
+    transfer::public_transfer(solver_reward_coin, solution.solver_addr);
+
     // Update statuses
     intent.status = INTENT_STATUS_EXECUTED;
     solution.status = SOLUTION_STATUS_EXECUTED;
@@ -392,6 +450,8 @@ public entry fun execute_solution(
         solution_id,
         user_addr: sender,
         executed_at_ms: timestamp_ms,
+        solver_reward: solver_reward_amount,
+        platform_fee: platform_fee_amount,
     });
 }
 
@@ -423,6 +483,7 @@ public entry fun reject_solution(
 }
 
 /// Revoke an intent (only owner can revoke)
+/// Refunds the full fee to the user
 #[allow(lint(public_entry))]
 public entry fun revoke_intent(
     intent: &mut Intent,
@@ -436,6 +497,14 @@ public entry fun revoke_intent(
     assert!(intent.user_addr == sender, E_UNAUTHORIZED);
     assert!(intent.status == INTENT_STATUS_PENDING, E_INVALID_STATUS_TRANSITION);
 
+    // Refund fee to user
+    let refund_amount = balance::value(&intent.intent_fee);
+    if (refund_amount > 0) {
+        let refund_balance = balance::withdraw_all(&mut intent.intent_fee);
+        let refund_coin = coin::from_balance(refund_balance, ctx);
+        transfer::public_transfer(refund_coin, sender);
+    };
+
     // Update status
     intent.status = INTENT_STATUS_REVOKED;
 
@@ -444,6 +513,7 @@ public entry fun revoke_intent(
         intent_id: object::uid_to_inner(&intent.id),
         user_addr: sender,
         revoked_at_ms: timestamp_ms,
+        refunded_fee: refund_amount,
     });
 }
 
@@ -614,8 +684,8 @@ public fun get_access_condition_min_solver_reputation_score(condition: &AccessCo
 // ===== TEST HELPERS =====
 
 #[test_only]
-public fun init_for_testing(_ctx: &mut TxContext) {
-    // Registry module doesn't have shared state, so nothing to initialize
+public fun init_for_testing(ctx: &mut TxContext) {
+    init(ctx);
 }
 
 #[test_only]
@@ -661,11 +731,12 @@ fun test_intent_solution_lifecycle_with_attestation() {
         ts::return_shared(clock_ref);
     };
 
-    // User submits intent
+    // User submits intent with fee
     ts::next_tx(&mut scenario, USER);
     {
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(MIN_INTENT_FEE, ts::ctx(&mut scenario));
 
         submit_intent(
             "walrus_blob_id_intent_001",
@@ -676,6 +747,7 @@ fun test_intent_solution_lifecycle_with_attestation() {
             solver_registry::get_min_stake_amount(),
             true, // requires attestation
             5000, // min_solver_reputation_score
+            fee_coin,
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -756,15 +828,17 @@ fun test_intent_solution_lifecycle_with_attestation() {
     {
         let mut intent = ts::take_from_sender<Intent>(&scenario);
         let mut solution = ts::take_from_address<Solution>(&scenario, SOLVER);
+        let mut treasury = ts::take_shared<Treasury>(&scenario);
         let clock_ref = ts::take_shared<Clock>(&scenario);
 
-        execute_solution(&mut intent, &mut solution, &clock_ref, ts::ctx(&mut scenario));
+        execute_solution(&mut intent, &mut solution, &mut treasury, &clock_ref, ts::ctx(&mut scenario));
 
         assert!(get_intent_status(&intent) == INTENT_STATUS_EXECUTED, 5);
         assert!(get_solution_status(&solution) == SOLUTION_STATUS_EXECUTED, 6);
 
         transfer::public_transfer(intent, USER);
         transfer::public_transfer(solution, SOLVER);
+        ts::return_shared(treasury);
         ts::return_shared(clock_ref);
     };
 
@@ -795,6 +869,7 @@ fun test_unregistered_solver_fails() {
     {
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(MIN_INTENT_FEE, ts::ctx(&mut scenario));
 
         submit_intent(
             "walrus_blob_id",
@@ -805,6 +880,7 @@ fun test_unregistered_solver_fails() {
             solver_registry::get_min_stake_amount(),
             false,
             0, // min_solver_reputation_score
+            fee_coin,
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -854,6 +930,7 @@ fun test_intent_revocation() {
     {
         let clock_ref = ts::take_shared<Clock>(&scenario);
         let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(MIN_INTENT_FEE, ts::ctx(&mut scenario));
 
         submit_intent(
             "walrus_blob_id",
@@ -864,6 +941,7 @@ fun test_intent_revocation() {
             0,
             false,
             0, // min_solver_reputation_score
+            fee_coin,
             &clock_ref,
             ts::ctx(&mut scenario),
         );
@@ -880,6 +958,221 @@ fun test_intent_revocation() {
         revoke_intent(&mut intent, &clock_ref, ts::ctx(&mut scenario));
 
         assert!(get_intent_status(&intent) == INTENT_STATUS_REVOKED, 1);
+
+        ts::return_to_sender(&scenario, intent);
+        ts::return_shared(clock_ref);
+    };
+
+    // Cleanup
+    ts::next_tx(&mut scenario, USER);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
+}
+/// Test fee mechanism: Fee distribution on execution
+#[test]
+fun test_fee_distribution_on_execution() {
+    let mut scenario = ts::begin(ADMIN);
+
+    // Initialize modules
+    solver_registry::init_for_testing(ts::ctx(&mut scenario));
+    init_for_testing(ts::ctx(&mut scenario));
+
+    // Create and share Clock
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, ADMIN);
+
+    // Register solver
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let mut solver_reg = ts::take_shared<SolverRegistry>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let stake = coin::mint_for_testing<SUI>(
+            solver_registry::get_min_stake_amount(),
+            ts::ctx(&mut scenario),
+        );
+
+        solver_registry::register_solver(&mut solver_reg, stake, &clock_ref, ts::ctx(&mut scenario));
+
+        ts::return_shared(solver_reg);
+        ts::return_shared(clock_ref);
+    };
+
+    // User submits intent with fee
+    let intent_fee_amount = 10_000_000; // 0.01 SUI
+    ts::next_tx(&mut scenario, USER);
+    {
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(intent_fee_amount, ts::ctx(&mut scenario));
+
+        submit_intent(
+            "walrus_blob_intent_fee_test",
+            now,
+            now + 10_000,
+            now + 86_400_000,
+            true,
+            solver_registry::get_min_stake_amount(),
+            true,
+            5000,
+            fee_coin,
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        ts::return_shared(clock_ref);
+    };
+
+    // Solver submits solution
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let mut intent = ts::take_from_address<Intent>(&scenario, USER);
+        let solver_reg = ts::take_shared<SolverRegistry>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        submit_solution(
+            &mut intent,
+            &solver_reg,
+            "walrus_blob_solution_fee_test",
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        transfer::public_transfer(intent, USER);
+        ts::return_shared(solver_reg);
+        ts::return_shared(clock_ref);
+    };
+
+    // Enclave attests solution
+    ts::next_tx(&mut scenario, SOLVER);
+    {
+        let mut solution = ts::take_from_address<Solution>(&scenario, SOLVER);
+        let intent = ts::take_from_address<Intent>(&scenario, USER);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+
+        attest_solution(
+            &mut solution,
+            &intent,
+            b"input_hash",
+            b"output_hash",
+            b"measurement",
+            b"signature",
+            now,
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        transfer::public_transfer(solution, SOLVER);
+        transfer::public_transfer(intent, USER);
+        ts::return_shared(clock_ref);
+    };
+
+    // User selects best solution
+    ts::next_tx(&mut scenario, USER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        let pending = get_intent_pending_solutions(&intent);
+        let solution_id = *vector::borrow(&pending, 0);
+
+        select_best_solution(&mut intent, solution_id, &clock_ref, ts::ctx(&mut scenario));
+
+        ts::return_to_sender(&scenario, intent);
+        ts::return_shared(clock_ref);
+    };
+
+    // User executes solution - verify fee distribution
+    ts::next_tx(&mut scenario, USER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let mut solution = ts::take_from_address<Solution>(&scenario, SOLVER);
+        let mut treasury = ts::take_shared<Treasury>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        let treasury_balance_before = balance::value(&treasury.balance);
+
+        execute_solution(&mut intent, &mut solution, &mut treasury, &clock_ref, ts::ctx(&mut scenario));
+
+        // Verify platform fee was collected
+        let expected_platform_fee = (intent_fee_amount * PLATFORM_FEE_BPS) / 10000;
+        let treasury_balance_after = balance::value(&treasury.balance);
+        assert!(treasury_balance_after == treasury_balance_before + expected_platform_fee, 1);
+        assert!(treasury.total_fees_collected == expected_platform_fee, 2);
+
+        // Verify intent fee is empty after distribution
+        assert!(balance::value(&intent.intent_fee) == 0, 3);
+
+        transfer::public_transfer(intent, USER);
+        transfer::public_transfer(solution, SOLVER);
+        ts::return_shared(treasury);
+        ts::return_shared(clock_ref);
+    };
+
+    // Clean up
+    ts::next_tx(&mut scenario, ADMIN);
+    {
+        let clock = ts::take_shared<Clock>(&scenario);
+        clock.destroy_for_testing();
+    };
+
+    ts::end(scenario);
+}
+
+/// Test fee mechanism: Fee refund on revocation
+#[test]
+fun test_fee_refund_on_revocation() {
+    let mut scenario = ts::begin(USER);
+
+    init_for_testing(ts::ctx(&mut scenario));
+
+    let clock = clock::create_for_testing(ts::ctx(&mut scenario));
+    clock.share_for_testing();
+    ts::next_tx(&mut scenario, USER);
+
+    let intent_fee_amount = 5_000_000; // 0.005 SUI
+
+    // User submits intent with fee
+    {
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+        let now = clock::timestamp_ms(&clock_ref);
+        let fee_coin = coin::mint_for_testing<SUI>(intent_fee_amount, ts::ctx(&mut scenario));
+
+        submit_intent(
+            "walrus_blob_refund_test",
+            now,
+            now + 10_000,
+            now + 86_400_000,
+            false,
+            0,
+            false,
+            0,
+            fee_coin,
+            &clock_ref,
+            ts::ctx(&mut scenario),
+        );
+
+        ts::return_shared(clock_ref);
+    };
+
+    // User revokes intent - should get full refund
+    ts::next_tx(&mut scenario, USER);
+    {
+        let mut intent = ts::take_from_sender<Intent>(&scenario);
+        let clock_ref = ts::take_shared<Clock>(&scenario);
+
+        assert!(balance::value(&intent.intent_fee) == intent_fee_amount, 1);
+
+        revoke_intent(&mut intent, &clock_ref, ts::ctx(&mut scenario));
+
+        assert!(get_intent_status(&intent) == INTENT_STATUS_REVOKED, 2);
+        // Verify fee was refunded (balance should be 0)
+        assert!(balance::value(&intent.intent_fee) == 0, 3);
 
         ts::return_to_sender(&scenario, intent);
         ts::return_shared(clock_ref);
