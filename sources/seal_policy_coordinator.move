@@ -65,7 +65,7 @@ fun init(ctx: &mut TxContext) {
 // ===== ADMIN FUNCTIONS =====
 
 /// Update enclave public key
-public entry fun update_enclave_pk(
+entry fun update_enclave_pk(
     config: &mut EnclaveConfig,
     new_enclave_pk: vector<u8>,
     clock: &Clock,
@@ -85,8 +85,7 @@ public entry fun update_enclave_pk(
 /// Seal entry point to approve access to an Intent.
 /// Following Nautilus pattern: approves if called by enclave public key.
 /// Also checks standard access control (user and solver permissions).
-#[allow(lint(public_entry))]
-public entry fun seal_approve_intent(
+entry fun seal_approve_intent(
     intent: &Intent,
     config: &EnclaveConfig,
     solver_registry_ref: &solver_registry::SolverRegistry,
@@ -143,8 +142,7 @@ public entry fun seal_approve_intent(
 /// Seal entry point to approve access to a Solution.
 /// Following Nautilus pattern: approves if called by enclave public key.
 /// Also checks if requester is the solution owner.
-#[allow(lint(public_entry))]
-public entry fun seal_approve_solution(
+entry fun seal_approve_solution(
     solution: &Solution,
     config: &EnclaveConfig,
     clock: &Clock,
@@ -272,10 +270,9 @@ const ADMIN: address = @0xA;
 const USER: address = @0xB;
 #[test_only]
 const SOLVER: address = @0xC;
-#[test_only]
 
 #[test_only]
-public fun init_for_testing(ctx: &mut TxContext) {
+public fun init_for_testing(ctx: &mut tx_context::TxContext) {
     init(ctx);
 }
 

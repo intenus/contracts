@@ -1,21 +1,147 @@
 # Intenus Protocol - Smart Contracts API Reference
 
-## Module: `intenus::solver_registry`
+Quick reference for developers on important functions in Intenus smart contracts.
 
-### Entry Functions
+---
+
+## Module Overview
+
+- **`registry`** - Core intent & solution lifecycle (submit, attest, execute)
+- **`solver_registry`** - Solver registration, staking, reputation
+- **`slash_manager`** - Slashing mechanism with TEE evidence
+- **`tee_verifier`** - TEE attestation verification
+- **`seal_policy_coordinator`** - Seal policy coordination for encryption
+
+---
+
+## Entry Functions (Main Functions)
+
+### Module: `intenus::registry`
+
+#### `submit_intent`
+
+```move
+public entry fun submit_intent(
+    blob_id: String,
+    solver_access_start_ms: u64,
+    solver_access_end_ms: u64,
+    auto_revoke_ms: u64,
+    requires_solver_registration: bool,
+    min_solver_stake: u64,
+    requires_attestation: bool,
+    min_solver_reputation_score: u64,
+    fee: Coin<SUI>,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** User submits intent with fee and policy parameters.
+
+#### `submit_solution`
+
+```move
+public entry fun submit_solution(
+    intent: &mut Intent,
+    solver_registry: &SolverRegistry,
+    blob_id: String,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** Solver submits solution for intent (validates policy on-chain).
+
+#### `attest_solution`
+
+```move
+public entry fun attest_solution(
+    solution: &mut Solution,
+    intent: &Intent,
+    input_hash: vector<u8>,
+    output_hash: vector<u8>,
+    measurement: vector<u8>,
+    signature: vector<u8>,
+    timestamp_ms: u64,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** Enclave attests solution with signature and measurement.
+
+#### `select_best_solution`
+
+```move
+public entry fun select_best_solution(
+    intent: &mut Intent,
+    solution_id: ID,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** User selects best solution from attested solutions.
+
+#### `execute_solution`
+
+```move
+public entry fun execute_solution(
+    intent: &mut Intent,
+    solution: &mut Solution,
+    treasury: &mut Treasury,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** Execute solution, distribute fee (solver reward + platform fee).
+
+#### `reject_solution`
+
+```move
+public entry fun reject_solution(
+    solution: &mut Solution,
+    solver_registry: &mut SolverRegistry,
+    reason: vector<u8>,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** Reject solution (for slashing mechanism).
+
+#### `revoke_intent`
+
+```move
+public entry fun revoke_intent(
+    intent: &mut Intent,
+    clock: &Clock,
+    ctx: &mut TxContext
+)
+```
+
+**Purpose:** User revokes intent and refunds fee.
+
+---
+
+### Module: `intenus::solver_registry`
 
 #### `register_solver`
+
 ```move
-public fun register_solver(
+entry fun register_solver(
     registry: &mut SolverRegistry,
     stake: Coin<SUI>,
     clock: &Clock,
     ctx: &mut TxContext
 )
 ```
-Register as a solver with minimum stake requirement.
+
+**Purpose:** Register as a solver with minimum stake (1 SUI).
 
 #### `increase_stake`
+
 ```move
 public fun increase_stake(
     registry: &mut SolverRegistry,
@@ -23,9 +149,11 @@ public fun increase_stake(
     ctx: &mut TxContext
 )
 ```
-Increase stake amount for an existing solver.
+
+**Purpose:** Increase stake amount.
 
 #### `initiate_withdrawal`
+
 ```move
 public fun initiate_withdrawal(
     registry: &mut SolverRegistry,
@@ -34,9 +162,11 @@ public fun initiate_withdrawal(
     ctx: &mut TxContext
 )
 ```
-Start withdrawal process with 7-day cooldown.
+
+**Purpose:** Start withdrawal with 7-day cooldown.
 
 #### `complete_withdrawal`
+
 ```move
 public fun complete_withdrawal(
     registry: &mut SolverRegistry,
@@ -46,122 +176,15 @@ public fun complete_withdrawal(
     ctx: &mut TxContext
 ): Coin<SUI>
 ```
-Complete withdrawal after cooldown, applying any slashes.
 
-### View Functions
-
-#### `get_solver_profile`
-```move
-public fun get_solver_profile(
-    registry: &SolverRegistry,
-    solver: address
-): Option<SolverProfile>
-```
-
-#### `get_solver_stake`
-```move
-public fun get_solver_stake(
-    registry: &SolverRegistry,
-    solver: address
-): u64
-```
-
-#### `get_solver_reputation`
-```move
-public fun get_solver_reputation(
-    registry: &SolverRegistry,
-    solver: address
-): u64
-```
-
-#### `is_solver_active`
-```move
-public fun is_solver_active(
-    registry: &SolverRegistry,
-    solver: address
-): bool
-```
-
-#### `get_registry_stats`
-```move
-public fun get_registry_stats(
-    registry: &SolverRegistry
-): (u64, u64, u64)
-```
-Returns: (total_solvers, min_stake, withdrawal_cooldown)
-
-### Internal (Package) Functions
-
-#### `record_batch_participation`
-```move
-public(package) fun record_batch_participation(
-    registry: &mut SolverRegistry,
-    solver: address,
-    batch_id: vector<u8>,
-    won: bool,
-    surplus_generated: u64,
-    clock: &Clock
-)
-```
-
-#### `slash_solver`
-```move
-public(package) fun slash_solver(
-    admin_cap: &AdminCap,
-    registry: &mut SolverRegistry,
-    solver: address,
-    evidence: vector<u8>,
-    clock: &Clock
-)
-```
-
-#### `distribute_batch_rewards`
-```move
-public(package) fun distribute_batch_rewards(
-    registry: &SolverRegistry,
-    batch_id: vector<u8>,
-    winner: address,
-    surplus_amount: u64,
-    reward_coin: Coin<SUI>,
-    ctx: &mut TxContext
-)
-```
-
-#### Constants Getters
-```move
-public(package) fun get_min_stake_amount(): u64
-public(package) fun get_withdrawal_cooldown_ms(): u64
-public(package) fun get_slash_percentage(): u8
-```
-
-### Admin Functions
-
-#### `update_min_stake`
-```move
-public fun update_min_stake(
-    admin_cap: &AdminCap,
-    registry: &mut SolverRegistry,
-    new_min_stake: u64
-)
-```
-
-#### `update_slash_percentage`
-```move
-public fun update_slash_percentage(
-    admin_cap: &AdminCap,
-    registry: &mut SolverRegistry,
-    new_percentage: u8
-)
-```
-Max 50% slash allowed.
+**Purpose:** Complete withdrawal after cooldown, apply slashes.
 
 ---
 
-## Module: `intenus::slash_manager`
-
-### Entry Functions
+### Module: `intenus::slash_manager`
 
 #### `submit_slash`
+
 ```move
 public fun submit_slash(
     manager: &mut SlashManager,
@@ -171,9 +194,11 @@ public fun submit_slash(
     ctx: &mut TxContext
 )
 ```
-Submit slash with TEE evidence, creates soulbound NFT.
+
+**Purpose:** Submit slash with TEE evidence, creates soulbound NFT.
 
 #### `file_appeal`
+
 ```move
 public fun file_appeal(
     manager: &mut SlashManager,
@@ -184,11 +209,13 @@ public fun file_appeal(
     ctx: &mut TxContext
 )
 ```
-File appeal within 24 hours of slash.
+
+**Purpose:** Solver files appeal within 24h after slash.
 
 #### `resolve_appeal`
+
 ```move
-public fun resolve_appeal(
+public entry fun resolve_appeal(
     admin_cap: &AdminCap,
     manager: &mut SlashManager,
     slash_record: &mut SlashRecord,
@@ -197,124 +224,18 @@ public fun resolve_appeal(
     clock: &Clock
 )
 ```
-Admin resolves appeal (approved/rejected).
 
-### View Functions
-
-#### `get_solver_slashes`
-```move
-public fun get_solver_slashes(
-    manager: &SlashManager,
-    solver: address
-): VecMap<ID, u8>
-```
-Returns: Map of slash_id -> severity
-
-#### `calculate_total_slash_percentage`
-```move
-public fun calculate_total_slash_percentage(
-    manager: &SlashManager,
-    solver: address
-): u64
-```
-Returns: Total slash in basis points (capped at 10000 = 100%)
-
-#### `is_slash_appealed_and_approved`
-```move
-public fun is_slash_appealed_and_approved(
-    manager: &SlashManager,
-    slash_id: ID
-): bool
-```
-
-#### `has_active_slashes`
-```move
-public fun has_active_slashes(
-    manager: &SlashManager,
-    solver: address
-): bool
-```
-
-### Structs
-
-#### `SlashEvidence`
-```move
-public struct SlashEvidence has copy, drop, store {
-    batch_id: u64,
-    solution_id: vector<u8>,
-    solver_address: address,
-    severity: u8,
-    reason_code: u8,
-    reason_message: vector<u8>,
-    failure_context: vector<u8>,
-    attestation: vector<u8>,
-    attestation_timestamp: u64,
-    tee_measurement: vector<u8>,
-}
-```
+**Mục đích:** Admin resolve appeal (approved/rejected).
 
 ---
 
-## Module: `intenus::batch_manager`
-
-### Entry Functions
-
-#### `start_new_batch`
-```move
-public fun start_new_batch(
-    admin_cap: &AdminCap,
-    manager: &mut BatchManager,
-    batch_id: vector<u8>,
-    clock: &Clock
-)
-```
-
-### View Functions
-
-#### `get_current_batch`
-```move
-public fun get_current_batch(
-    manager: &BatchManager
-): Option<BatchSummary>
-```
-
-#### `get_batch_stats`
-```move
-public fun get_batch_stats(
-    manager: &BatchManager,
-    epoch: u64
-): Option<BatchSummary>
-```
-
-### Structs
-
-#### `BatchSummary`
-```move
-public struct BatchSummary has copy, drop {
-    batch_id: vector<u8>,
-    epoch: u64,
-    intent_count: u64,
-    total_value_usd: u64,
-    solver_count: u64,
-    winning_solver: Option<address>,
-    winning_solution_id: Option<vector<u8>>,
-    total_surplus_generated: u64,
-    status: u8,
-    created_at: u64,
-    executed_at: Option<u64>,
-}
-```
-
----
-
-## Module: `intenus::tee_verifier`
-
-### Entry Functions
+### Module: `intenus::tee_verifier`
 
 #### `initialize_trusted_measurement`
+
 ```move
-public fun initialize_trusted_measurement(
-    admin_cap: &AdminCap,
+entry fun initialize_trusted_measurement(
+    _: &AdminCap,
     verifier: &mut TeeVerifier,
     service_name: vector<u8>,
     measurement: vector<u8>,
@@ -323,12 +244,14 @@ public fun initialize_trusted_measurement(
     clock: &Clock
 )
 ```
-One-time initialization of trusted TEE measurement.
+
+**Mục đích:** One-time init trusted TEE measurement (admin only).
 
 #### `rotate_attestation_key`
+
 ```move
-public fun rotate_attestation_key(
-    admin_cap: &AdminCap,
+public entry fun rotate_attestation_key(
+    _: &AdminCap,
     verifier: &mut TeeVerifier,
     new_measurement: vector<u8>,
     new_version: vector<u8>,
@@ -336,218 +259,178 @@ public fun rotate_attestation_key(
     clock: &Clock
 )
 ```
-Rotate attestation key and measurement.
 
-#### `submit_attestation_record`
-```move
-public fun submit_attestation_record(
-    verifier: &mut TeeVerifier,
-    batch_id: u64,
-    input_hash: vector<u8>,
-    output_hash: vector<u8>,
-    measurement: vector<u8>,
-    clock: &Clock
-)
-```
-Submit TEE attestation record for a batch.
-
-### View Functions
-
-#### `verify_measurement_match`
-```move
-public fun verify_measurement_match(
-    verifier: &TeeVerifier,
-    provided: &vector<u8>
-): bool
-```
-
-#### `check_timestamp_freshness`
-```move
-public fun check_timestamp_freshness(
-    attestation_timestamp: u64,
-    clock: &Clock
-): bool
-```
-Checks if timestamp is within 5 minutes drift.
-
-#### `get_attestation_record`
-```move
-public fun get_attestation_record(
-    verifier: &TeeVerifier,
-    batch_id: u64
-): bool
-```
+**Purpose:** Rotate attestation key and measurement.
 
 ---
 
-## Module: `intenus::seal_policy_coordinator`
-
-### Entry Functions
+### Module: `intenus::seal_policy_coordinator`
 
 #### `seal_approve_intent`
+
 ```move
-public entry fun seal_approve_intent(
-    policy_id: vector<u8>,
-    registry: &PolicyRegistry,
+entry fun seal_approve_intent(
+    intent: &Intent,
+    config: &EnclaveConfig,
     solver_registry_ref: &solver_registry::SolverRegistry,
     clock: &Clock,
     ctx: &TxContext
 )
 ```
-Validate intent policy access (for solvers).
+
+**Purpose:** Seal entry point to approve access for Intent (validates solver permissions).
 
 #### `seal_approve_strategy`
+
 ```move
-public entry fun seal_approve_strategy(
-    policy_id: vector<u8>,
-    registry: &PolicyRegistry,
+entry fun seal_approve_strategy(
+    strategy_id: vector<u8>,
+    config: &EnclaveConfig,
     solver_registry_ref: &solver_registry::SolverRegistry,
     clock: &Clock,
     ctx: &TxContext
 )
 ```
-Validate strategy policy access.
+
+**Purpose:** Seal entry point to approve access for Solver Strategy.
 
 #### `seal_approve_history`
+
 ```move
-public entry fun seal_approve_history(
-    policy_id: vector<u8>,
-    registry: &PolicyRegistry,
+entry fun seal_approve_history(
+    user_addr: address,
+    config: &EnclaveConfig,
     solver_registry_ref: &solver_registry::SolverRegistry,
     ctx: &TxContext
 )
 ```
-Validate user history policy access.
 
-### Policy Management
-
-#### `create_intent_policy`
-```move
-public fun create_intent_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    batch_id: u64,
-    solver_access_start_ms: u64,
-    solver_access_end_ms: u64,
-    router_access_enabled: bool,
-    auto_revoke_time: u64,
-    requires_solver_registration: bool,
-    min_solver_stake: u64,
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-    clock: &Clock,
-    ctx: &mut TxContext
-)
-```
-Create policy for user intent encryption.
-
-#### `create_solver_strategy_policy`
-```move
-public fun create_solver_strategy_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    router_can_access: bool,
-    admin_unlock_time: u64,
-    is_public: bool,
-    requires_solver_registration: bool,
-    min_solver_stake: u64,
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-    clock: &Clock,
-    ctx: &mut TxContext
-)
-```
-Create policy for solver strategy encryption.
-
-#### `create_user_history_policy`
-```move
-public fun create_user_history_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    router_access_level: u8,
-    user_can_revoke: bool,
-    requires_solver_registration: bool,
-    min_solver_stake: u64,
-    requires_tee_attestation: bool,
-    expected_measurement: vector<u8>,
-    purpose: vector<u8>,
-    clock: &Clock,
-    ctx: &mut TxContext
-)
-```
-Create policy for user history encryption.
-
-#### `revoke_policy`
-```move
-public fun revoke_policy(
-    registry: &mut PolicyRegistry,
-    policy_type: u8,
-    policy_id: vector<u8>,
-    ctx: &mut TxContext
-)
-```
-Revoke a policy (owner only).
-
-#### `auto_revoke_expired`
-```move
-public fun auto_revoke_expired(
-    registry: &mut PolicyRegistry,
-    policy_type: u8,
-    policy_ids: vector<vector<u8>>,
-    clock: &Clock
-)
-```
-Auto-revoke expired policies in batch.
+**Purpose:** Seal entry point to approve access for User History.
 
 ---
 
-## Type Definitions
+## View Functions (Important)
+
+### `solver_registry`
+
+```move
+// Get solver profile (stake, reputation, metrics)
+public fun get_solver_profile(registry: &SolverRegistry, solver: address): Option<SolverProfile>
+
+// Get stake amount
+public fun get_solver_stake(registry: &SolverRegistry, solver: address): u64
+
+// Get reputation (0-10000)
+public fun get_solver_reputation(registry: &SolverRegistry, solver: address): u64
+
+// Check if solver is active
+public fun is_solver_active(registry: &SolverRegistry, solver: address): bool
+
+// Get registry stats
+public fun get_registry_stats(registry: &SolverRegistry): (u64, u64, u64)
+// Returns: (total_solvers, min_stake, withdrawal_cooldown)
+```
+
+### `registry`
+
+```move
+// Get intent status
+public fun get_intent_status(intent: &Intent): u8
+
+// Get pending solutions
+public fun get_intent_pending_solutions(intent: &Intent): vector<ID>
+
+// Check if solution has attestation
+public fun has_attestation(solution: &Solution): bool
+
+// Get attestation
+public fun get_attestation(solution: &Solution): Option<Attestation>
+```
+
+### `slash_manager`
+
+```move
+// Get all slashes for a solver
+public fun get_solver_slashes(manager: &SlashManager, solver: address): VecMap<ID, u8>
+
+// Calculate total slash percentage (capped at 100%)
+public fun calculate_total_slash_percentage(manager: &SlashManager, solver: address): u64
+
+// Check if solver has active slashes
+public fun has_active_slashes(manager: &SlashManager, solver: address): bool
+```
+
+### `tee_verifier`
+
+```move
+// Verify if measurement matches trusted measurement
+public fun verify_measurement_match(verifier: &TeeVerifier, provided: &vector<u8>): bool
+
+// Check if attestation timestamp is fresh (within 5 min)
+public fun check_timestamp_freshness(attestation_timestamp: u64, clock: &Clock): bool
+```
+
+---
+
+## Key Structs
+
+### `Intent`
+
+```move
+public struct Intent has key, store {
+    id: UID,
+    user_addr: address,
+    created_ms: u64,
+    blob_id: String,  // Walrus blob reference
+    policy: PolicyParams,
+    intent_fee: Balance<SUI>,
+    status: u8,
+    best_solution_id: Option<ID>,
+    pending_solutions: vector<ID>,
+}
+```
+
+### `Solution`
+
+```move
+public struct Solution has key, store {
+    id: UID,
+    intent_id: ID,
+    solver_addr: address,
+    created_ms: u64,
+    blob_id: String,  // Walrus blob reference
+    attestation: Option<Attestation>,
+    status: u8,
+}
+```
 
 ### `SolverProfile`
+
 ```move
 public struct SolverProfile has copy, drop, store {
     solver_address: address,
     stake_amount: u64,
-    reputation_score: u64,
+    reputation_score: u64,  // 0-10000
     total_batches_participated: u64,
     batches_won: u64,
     total_surplus_generated: u64,
     accuracy_score: u64,
-    last_submission_epoch: u64,
-    registration_timestamp: u64,
     status: u8,
     pending_withdrawal: Option<u64>,
 }
 ```
 
-### `SlashRecord` (Soulbound NFT)
+### `SlashEvidence`
+
 ```move
-public struct SlashRecord has key, store {
-    id: UID,
-    solver_address: address,
+public struct SlashEvidence has copy, drop, store {
     batch_id: u64,
     solution_id: vector<u8>,
-    severity: u8,
-    reason: vector<u8>,
-    slash_percentage_bps: u64,
-    created_at: u64,
-    appealed: bool,
-    appeal_approved: bool,
-}
-```
-
-### `Appeal`
-```move
-public struct Appeal has key, store {
-    id: UID,
-    slash_id: ID,
     solver_address: address,
-    reason: vector<u8>,
-    counter_evidence: vector<u8>,
-    created_at: u64,
-    status: u8,
+    severity: u8,  // 1=minor(5%), 2=significant(20%), 3=malicious(100%)
+    reason_message: vector<u8>,
+    attestation_timestamp: u64,
+    tee_measurement: vector<u8>,
 }
 ```
 
@@ -556,188 +439,117 @@ public struct Appeal has key, store {
 ## Constants
 
 ### Solver Registry
-```move
-MIN_STAKE_AMOUNT: u64 = 1_000_000_000          // 1 SUI
-WITHDRAWAL_COOLDOWN_MS: u64 = 604_800_000      // 7 days
-SLASH_PERCENTAGE: u8 = 20                      // 20%
-REWARD_PERCENTAGE: u8 = 10                     // 10%
-MAX_REPUTATION: u64 = 10_000
 
-STATUS_ACTIVE: u8 = 0
-STATUS_SLASHED: u8 = 1
-STATUS_UNSTAKING: u8 = 3
-```
+- `MIN_STAKE_AMOUNT`: `1_000_000_000` (1 SUI)
+- `WITHDRAWAL_COOLDOWN_MS`: `604_800_000` (7 days)
+- `MAX_REPUTATION`: `10_000`
 
-### Slash Manager
-```move
-SEVERITY_MINOR: u8 = 1                         // 5% slash
-SEVERITY_SIGNIFICANT: u8 = 2                   // 20% slash
-SEVERITY_MALICIOUS: u8 = 3                     // 100% slash
+### Slash Severity
 
-MINOR_SLASH_BPS: u64 = 500                     // 5%
-SIGNIFICANT_SLASH_BPS: u64 = 2000              // 20%
-MALICIOUS_SLASH_BPS: u64 = 10000               // 100%
+- `SEVERITY_MINOR`: `1` → 5% slash
+- `SEVERITY_SIGNIFICANT`: `2` → 20% slash
+- `SEVERITY_MALICIOUS`: `3` → 100% slash
 
-APPEAL_WINDOW_MS: u64 = 86_400_000             // 24 hours
-```
+### Intent Status
 
-### Batch Manager
-```move
-STATUS_OPEN: u8 = 0
-STATUS_SOLVING: u8 = 1
-STATUS_RANKING: u8 = 2
-STATUS_EXECUTED: u8 = 3
+- `INTENT_STATUS_PENDING`: `0`
+- `INTENT_STATUS_BEST_SOLUTION_SELECTED`: `1`
+- `INTENT_STATUS_EXECUTED`: `2`
+- `INTENT_STATUS_REVOKED`: `3`
 
-DEFAULT_BATCH_DURATION_MS: u64 = 10_000        // 10 seconds
-DEFAULT_SOLVER_WINDOW_MS: u64 = 5_000          // 5 seconds
-```
+### Solution Status
 
-### TEE Verifier
-```move
-MAX_TIMESTAMP_DRIFT_MS: u64 = 300_000          // 5 minutes
-```
-
-### Seal Policy Coordinator
-```move
-POLICY_TYPE_INTENT: u8 = 0
-POLICY_TYPE_STRATEGY: u8 = 1
-POLICY_TYPE_USER_HISTORY: u8 = 2
-
-ROLE_USER: u8 = 0
-ROLE_SOLVER: u8 = 1
-ROLE_ROUTER: u8 = 2
-ROLE_ADMIN: u8 = 3
-```
+- `SOLUTION_STATUS_PENDING`: `0`
+- `SOLUTION_STATUS_ATTESTED`: `1`
+- `SOLUTION_STATUS_EXECUTED`: `2`
+- `SOLUTION_STATUS_REJECTED`: `3`
 
 ---
 
-## Error Codes
-
-### Solver Registry (1xxx)
-```move
-E_INSUFFICIENT_STAKE: u64 = 1001
-E_SOLVER_NOT_REGISTERED: u64 = 1002
-E_SOLVER_ALREADY_REGISTERED: u64 = 1003
-E_COOLDOWN_NOT_COMPLETE: u64 = 1007
-E_INVALID_STATUS: u64 = 1009
-E_INSUFFICIENT_BALANCE: u64 = 1011
-E_NO_PENDING_WITHDRAWAL: u64 = 1012
-```
-
-### Seal Policy Coordinator (3xxx)
-```move
-E_POLICY_EXISTS: u64 = 3001
-E_POLICY_NOT_FOUND: u64 = 3002
-E_INVALID_TIME_WINDOW: u64 = 3003
-E_UNAUTHORIZED: u64 = 3004
-E_POLICY_REVOKED: u64 = 3005
-```
-
-### TEE Verifier (4xxx)
-```move
-E_NOT_CONFIGURED: u64 = 4001
-E_INVALID_ATTESTATION: u64 = 4002
-E_MEASUREMENT_MISMATCH: u64 = 4003
-E_STALE_TIMESTAMP: u64 = 4004
-E_DUPLICATE_RECORD: u64 = 4005
-```
-
-### Batch Manager (5xxx)
-```move
-E_BATCH_EXISTS: u64 = 5002
-E_BATCH_NOT_FOUND: u64 = 5003
-E_INVALID_STATUS: u64 = 5004
-```
-
-### Slash Manager (6xxx)
-```move
-E_UNAUTHORIZED: u64 = 6001
-E_INVALID_SEVERITY: u64 = 6003
-E_APPEAL_ALREADY_FILED: u64 = 6004
-E_APPEAL_NOT_FOUND: u64 = 6005
-E_APPEAL_WINDOW_EXPIRED: u64 = 6006
-E_INVALID_TEE_ATTESTATION: u64 = 6009
-E_TRANSFER_REJECTED: u64 = 6010
-```
-
----
-
-## Architecture Overview
-
-### Module Dependencies
-```
-seal_policy_coordinator → solver_registry
-solver_registry → slash_manager
-slash_manager → tee_verifier
-batch_manager (standalone)
-```
+## Architecture
 
 ### Shared Objects
+
 - `SolverRegistry` - Global solver management
 - `SlashManager` - Global slash records
-- `BatchManager` - Batch lifecycle tracking
 - `TeeVerifier` - TEE attestation verification
-- `PolicyRegistry` - Seal policy coordination
+- `EnclaveConfig` (seal) - Seal policy coordination
+- `Treasury` - Platform fee collection
 
 ### Owned Objects
-- `AdminCap` - Admin capability (one per module)
-- `SlashRecord` - Soulbound NFT (owned by slashed solver)
 
-### Package Objects
-- `Appeal` - Shared appeal object
+- `Intent` - Owned by user
+- `Solution` - Owned by solver
+- `SlashRecord` - Soulbound NFT (owned by slashed solver)
+- `AdminCap` - Admin capability (one per module)
+
+### Module Dependencies
+
+```
+registry → solver_registry
+slash_manager → tee_verifier, solver_registry
+seal_policy_coordinator → solver_registry, registry
+```
 
 ---
 
-## Usage Examples
+## Typical Flow
 
-### Register as Solver
+### 1. User Submit Intent
+
 ```move
-use intenus::solver_registry;
-
-public entry fun register(
-    registry: &mut SolverRegistry,
-    payment: Coin<SUI>,
-    clock: &Clock,
-    ctx: &mut TxContext
-) {
-    solver_registry::register_solver(registry, payment, clock, ctx);
-}
+submit_intent(blob_id, time_window, fee, policy_params, ...)
 ```
 
-### Submit Slash
-```move
-use intenus::slash_manager;
+### 2. Solver Submit Solution
 
-public entry fun slash(
-    manager: &mut SlashManager,
-    verifier: &TeeVerifier,
-    evidence: SlashEvidence,
-    clock: &Clock,
-    ctx: &mut TxContext
-) {
-    slash_manager::submit_slash(manager, verifier, evidence, clock, ctx);
-}
+```move
+submit_solution(intent, solver_registry, blob_id, ...)
+// Validates: solver registered, stake sufficient, reputation OK, time window
 ```
 
-### Create Intent Policy
-```move
-use intenus::seal_policy_coordinator;
+### 3. Enclave Attest Solution
 
-public entry fun create_policy(
-    registry: &mut PolicyRegistry,
-    policy_id: vector<u8>,
-    batch_id: u64,
-    // ... other params
-    clock: &Clock,
-    ctx: &mut TxContext
-) {
-    seal_policy_coordinator::create_intent_policy(
-        registry,
-        policy_id,
-        batch_id,
-        // ... other args
-        clock,
-        ctx
-    );
-}
+```move
+attest_solution(solution, intent, input_hash, output_hash, signature, ...)
+```
+
+### 4. User Select Best Solution
+
+```move
+select_best_solution(intent, solution_id, ...)
+```
+
+### 5. User Execute Solution
+
+```move
+execute_solution(intent, solution, treasury, ...)
+// Distributes: solver reward (90%) + platform fee (10%)
+```
+
+---
+
+## Important Notes
+
+1. **Off-chain storage**: Intent & Solution content stored on Walrus, only `blob_id` on-chain
+2. **Policy enforcement**: Access conditions (stake, reputation, time window) validated on-chain
+3. **TEE verification**: Attestations verified by `tee_verifier` module
+4. **Slashing**: Applied during withdrawal, calculated from all active slashes
+5. **Seal integration**: Encryption/decryption handled by Seal client, contracts only validate access
+
+---
+
+## Testing
+
+All modules include `init_for_testing()` for test scenarios:
+
+```move
+#[test_only]
+public fun init_for_testing(ctx: &mut TxContext)
+```
+
+Run tests:
+
+```bash
+sui move test
 ```

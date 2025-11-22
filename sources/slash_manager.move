@@ -32,7 +32,6 @@ const APPEAL_WINDOW_MS: u64 = 86_400_000; // 24 hours
 
 // ===== STRUCTS =====
 
-/// Capability for admin operations
 public struct AdminCap has key, store {
     id: UID,
 }
@@ -179,7 +178,7 @@ fun init(witness: SLASH_MANAGER, ctx: &mut TxContext) {
 
 /// Submit a slash with TEE evidence, create soulbound NFT and apply penalty
 /// Note: Caller should verify solver exists before calling this function
-public entry fun submit_slash(
+public fun submit_slash(
     manager: &mut SlashManager,
     verifier: &TeeVerifier,
     evidence: SlashEvidence,
@@ -249,7 +248,7 @@ public entry fun submit_slash(
     });
 }
 
-public entry fun file_appeal(
+public fun file_appeal(
     manager: &mut SlashManager,
     slash_record: &mut SlashRecord,
     appeal_reason: vector<u8>,

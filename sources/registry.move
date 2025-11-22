@@ -21,13 +21,12 @@ const E_ATTESTATION_REQUIRED: u64 = 6009;
 const E_INSUFFICIENT_FEE: u64 = 6010;
 const E_NO_FEE_TO_REFUND: u64 = 6011;
 
-// ===== INTENT STATUS CONSTANTS =====
+// ===== CONSTANTS =====
 const INTENT_STATUS_PENDING: u8 = 0;
 const INTENT_STATUS_BEST_SOLUTION_SELECTED: u8 = 1;
 const INTENT_STATUS_EXECUTED: u8 = 2;
 const INTENT_STATUS_REVOKED: u8 = 3;
 
-// ===== SOLUTION STATUS CONSTANTS =====
 const SOLUTION_STATUS_PENDING: u8 = 0;
 const SOLUTION_STATUS_ATTESTED: u8 = 1;
 const SOLUTION_STATUS_SELECTED: u8 = 2;
@@ -40,7 +39,7 @@ const MIN_INTENT_FEE: u64 = 1_000_000; // 0.001 SUI minimum fee
 
 // ===== STRUCTS =====
 
-/// Treasury to hold platform fees (shared object)
+/// Treasury to hold platform fees
 public struct Treasury has key {
     id: UID,
     balance: Balance<SUI>,
@@ -48,13 +47,12 @@ public struct Treasury has key {
     admin: address,
 }
 
-/// Time window for solver access control (ON-CHAIN ENFORCEMENT)
+/// Time window for solver access control
 public struct TimeWindow has copy, drop, store {
     start_ms: u64,
     end_ms: u64,
 }
 
-/// Access condition for policy enforcement (ON-CHAIN ENFORCEMENT)
 public struct AccessCondition has copy, drop, store {
     requires_solver_registration: bool,
     min_solver_stake: u64,
@@ -62,7 +60,7 @@ public struct AccessCondition has copy, drop, store {
     min_solver_reputation_score: u64,
 }
 
-/// Policy parameters embedded in Intent (ON-CHAIN ENFORCEMENT)
+/// Policy parameters embedded in Intent
 public struct PolicyParams has copy, drop, store {
     solver_access_window: TimeWindow,
     auto_revoke_ms: u64,
@@ -70,7 +68,6 @@ public struct PolicyParams has copy, drop, store {
 }
 
 /// Enclave attestation for solution validation
-/// Following Nautilus pattern - gom tất cả TEE-related params
 public struct Attestation has copy, drop, store {
     /// Hash of input data (intent + constraints)
     input_hash: vector<u8>,
@@ -85,8 +82,6 @@ public struct Attestation has copy, drop, store {
 }
 
 /// Intent object - stores reference to IGS intent in Walrus (owned object)
-/// IGS intent content is stored OFF-CHAIN in Walrus
-/// On-chain only tracks blob_id, policy enforcement, and solution management
 public struct Intent has key, store {
     id: UID,
     user_addr: address,
@@ -108,21 +103,17 @@ public struct Intent has key, store {
 }
 
 /// Solution object - stores reference to IGS solution in Walrus (owned object)
-/// IGS solution content (PTB, surplus calculation, etc.) is stored OFF-CHAIN
-/// On-chain only tracks blob_id, attestation, and validation status
 public struct Solution has key, store {
     id: UID,
     intent_id: ID,
     solver_addr: address,
     created_ms: u64,
 
-    // Reference to IGS solution in Walrus (OFF-CHAIN STORAGE)
     blob_id: String,
 
     // Enclave attestation (Optional, verified by enclave)
     attestation: Option<Attestation>,
 
-    // On-chain status tracking
     status: u8,
 }
 
@@ -201,7 +192,7 @@ fun init(ctx: &mut TxContext) {
 
 /// Submit a new intent with embedded policy parameters
 /// Creates an Intent object with reference to IGS intent in Walrus
-/// The actual IGS intent content (operation, constraints, etc.) is stored OFF-CHAIN
+/// The off-chain IGS intent content (operation, constraints, etc.) which helps solvers understand the intent and solve it.
 #[allow(lint(public_entry))]
 public entry fun submit_intent(
     blob_id: String,
@@ -343,8 +334,8 @@ public entry fun attest_solution(
     // SECURITY: Verify solution belongs to this intent
     assert!(solution.intent_id == object::uid_to_inner(&intent.id), E_UNAUTHORIZED);
 
-    // TODO: Verify signature with enclave public key (done via seal-approve in seal module)
-    // TODO: Verify measurement if needed (can be done off-chain or via additional verification)
+    // TODO: Verify signature with enclave public key
+    // TODO: Verify measurement if needed
 
     // Create attestation after verification
     let attestation = Attestation {
@@ -690,10 +681,6 @@ public fun init_for_testing(ctx: &mut TxContext) {
 
 #[test_only]
 use sui::test_scenario::{Self as ts};
-#[test_only]
-use sui::coin;
-#[test_only]
-use sui::sui::SUI;
 
 #[test_only]
 const ADMIN: address = @0xA;
@@ -709,6 +696,8 @@ fun test_intent_solution_lifecycle_with_attestation() {
 
     // Initialize solver registry
     solver_registry::init_for_testing(ts::ctx(&mut scenario));
+    
+    init_for_testing(ts::ctx(&mut scenario));
 
     // Create and share Clock
     let clock = clock::create_for_testing(ts::ctx(&mut scenario));

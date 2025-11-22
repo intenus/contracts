@@ -143,7 +143,7 @@ public fun get_admin_cap_for_testing(ctx: &mut tx_context::TxContext): AdminCap 
 // ===== ENTRY FUNCTIONS =====
 
 /// Register as a solver with initial stake
-public entry fun register_solver(
+entry fun register_solver(
     registry: &mut SolverRegistry,
     stake: Coin<SUI>,
     clock: &Clock,
@@ -188,7 +188,7 @@ public entry fun register_solver(
 }
 
 /// Increase stake amount
-public entry fun increase_stake(
+entry fun increase_stake(
     registry: &mut SolverRegistry,
     additional_stake: Coin<SUI>,
     ctx: &mut tx_context::TxContext,
@@ -209,7 +209,7 @@ public entry fun increase_stake(
 }
 
 /// Initiate withdrawal process (starts cooldown)
-public entry fun initiate_withdrawal(
+entry fun initiate_withdrawal(
     registry: &mut SolverRegistry,
     amount: u64,
     clock: &Clock,
@@ -242,13 +242,13 @@ public entry fun initiate_withdrawal(
 }
 
 /// Complete withdrawal after cooldown period
-public fun complete_withdrawal(
+entry fun complete_withdrawal(
     registry: &mut SolverRegistry,
     slash_manager: &SlashManager,
     amount: u64,
     clock: &Clock,
     ctx: &mut TxContext,
-): Coin<SUI> {
+) {
     let solver_address = tx_context::sender(ctx);
     let timestamp = clock::timestamp_ms(clock);
 
@@ -303,7 +303,7 @@ public fun complete_withdrawal(
         timestamp,
     });
     
-    withdrawal_coin
+    transfer::public_transfer(withdrawal_coin, solver_address);
 }
 
 // ===== FRIEND FUNCTIONS (Inter-module) =====
@@ -521,12 +521,12 @@ fun log_approximation(value: u64): u64 {
 // ===== ADMIN FUNCTIONS =====
 
 /// Update minimum stake requirement (admin only)
-public entry fun update_min_stake(_: &AdminCap, registry: &mut SolverRegistry, new_min_stake: u64) {
+entry fun update_min_stake(_: &AdminCap, registry: &mut SolverRegistry, new_min_stake: u64) {
     registry.min_stake = new_min_stake;
 }
 
 /// Update slash percentage (admin only)
-public entry fun update_slash_percentage(
+entry fun update_slash_percentage(
     _: &AdminCap,
     registry: &mut SolverRegistry,
     new_percentage: u8,
